@@ -1,0 +1,34 @@
+# Local tools and generated output
+.DS_Store
+.idea/
+.vscode/
+.gradle/
+.kotlin/
+.swiftpm/
+.build/
+**/build/
+**/build*/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+local.properties
+.env
+.env.*
+*.log
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+*.cer
+*.mobileprovision
+*.provisionprofile
+# Private project material
+/dist/
+/design/
+/docs/
+/scripts/
+/website/
+/protocol/
+AGENTS.md
+SKILL.md

@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">Android Sync</string>
+    <string name="accessibility_description">Allow remote taps, swipes, navigation, and text insertion from a separately trusted Mac. Secure fields stay unavailable.</string>
+    <style name="Theme.AndroidSync" parent="android:style/Theme.Material.Light.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:windowLightStatusBar">true</item><item name="android:colorAccent">#5574E8</item></style>
+    <style name="Theme.AndroidSync.ClipboardCapture" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+</resources>
