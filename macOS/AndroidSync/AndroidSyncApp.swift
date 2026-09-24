@@ -30,6 +30,19 @@ private final class SingleInstanceGuard {
 }
 
 @main struct AndroidSyncApp: App {
+    // MenuBarExtra uses the NSImage's intrinsic size when creating its status item.
+    // A SwiftUI frame alone does not constrain an ICNS image in the menu bar.
+    private static let menuBarIcon: NSImage = {
+        let size = NSSize(width: 18, height: 18)
+        let artwork = NSImage(named: "AndroidSync")
+        let icon = NSImage(size: size, flipped: false) { bounds in
+            artwork?.draw(in: bounds)
+            return true
+        }
+        icon.isTemplate = false
+        return icon
+    }()
+
     private let singleInstanceGuard: SingleInstanceGuard
     @StateObject private var model: AppModel
     @AppStorage("appAppearance") private var appAppearance = AppAppearance.system.rawValue
@@ -65,7 +78,7 @@ private final class SingleInstanceGuard {
         MenuBarExtra {
             MenuView().environmentObject(model).preferredColorScheme(preferredColorScheme)
         } label: {
-            Image(nsImage: NSImage(named: "AndroidSync")!).resizable().scaledToFit().frame(width: 20, height: 20)
+            Image(nsImage: Self.menuBarIcon).renderingMode(.original)
                 .accessibilityLabel("Android Sync")
         }.menuBarExtraStyle(.window)
         Settings {
