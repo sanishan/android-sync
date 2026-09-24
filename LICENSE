@@ -1,0 +1,51 @@
+Android Sync Personal Source License 1.0
+Copyright (c) 2026 Muhammad Sanaullah. All rights reserved.
+
+This license applies to original Android Sync source code, documentation,
+website code, artwork, and compiled packages provided by Muhammad Sanaullah.
+Third-party components keep their own licenses and notices.
+
+1. Permission for personal use
+
+You may view and study the source code. You may copy, build, run, and privately
+modify Android Sync solely for your own personal, noncommercial use. You may
+make reasonable backup copies for that use.
+
+2. Conditions
+
+Keep this license and the copyright notice in every permitted copy. Keep the
+product name "Android Sync" and the website reference "AndroidSync.com" in
+the app and its accompanying attribution. Do not state or imply that you own
+the original project or that Muhammad Sanaullah endorses your changes.
+
+3. Uses that require prior written permission
+
+You may not use Android Sync or a modified version commercially, including in
+a paid product or service. You may not publish, upload to a public repository,
+distribute, sublicense, sell, or make available to others the source code,
+modified source code, compiled packages, or modified packages. You may not
+remove or replace the required name, website reference, or copyright notice.
+For any of these uses, obtain prior written permission from Muhammad Sanaullah.
+
+4. Ownership and no transfer
+
+The original project remains the property of Muhammad Sanaullah. This license
+grants limited use rights and does not transfer ownership, copyright, or
+trademark rights. Your private changes do not make you the owner of the
+original Android Sync project.
+
+5. Termination
+
+The permission in this license ends automatically if you breach its terms.
+After termination, stop using and delete copies made under this license,
+except where applicable law gives you a separate right.
+
+6. Disclaimer
+
+Android Sync is provided "as is", without warranties, to the extent permitted
+by applicable law. Muhammad Sanaullah is not liable for damages arising from
+use of the software to the extent permitted by applicable law.
+
+This is a source-available license, not an Open Source Initiative approved
+open-source license. Its restrictions on commercial use and redistribution
+are intentional.
