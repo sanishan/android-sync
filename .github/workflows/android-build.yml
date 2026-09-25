@@ -1,0 +1,65 @@
+name: Build Android
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: android-actions/setup-android@v4
+      - name: Install Android SDK packages
+        run: sdkmanager 'platforms;android-37' 'build-tools;36.0.0'
+      - name: Test and assemble
+        run: |
+          chmod +x android/gradlew
+          android/gradlew -p android :app:testLocalFullDebugUnitTest :app:assembleLocalFullRelease
+      - name: Prepare release signing key
+        id: signing
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_SYNC_RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_PASSWORD: ${{ secrets.ANDROID_SYNC_RELEASE_PASSWORD }}
+        run: |
+          if [[ -z "$RELEASE_KEYSTORE_BASE64" || -z "$RELEASE_PASSWORD" ]]; then
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            echo 'Signing secrets are absent; compilation and tests completed without a signed artifact.'
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/android-sync-signing"
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/android-sync-signing/release-signing.p12"
+          chmod 600 "$RUNNER_TEMP/android-sync-signing/release-signing.p12"
+          echo "ANDROID_SYNC_KEYSTORE=$RUNNER_TEMP/android-sync-signing/release-signing.p12" >> "$GITHUB_ENV"
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+      - name: Sign and verify APK
+        if: ${{ steps.signing.outputs.ready == 'true' }}
+        env:
+          ANDROID_SYNC_KEY_ALIAS: androidsync
+          ANDROID_SYNC_SIGNING_PASSWORD: ${{ secrets.ANDROID_SYNC_RELEASE_PASSWORD }}
+        run: |
+          unsigned='android/app/build/outputs/apk/localFull/release/app-localFull-release-unsigned.apk'
+          aligned="$RUNNER_TEMP/AndroidSync-aligned.apk"
+          mkdir -p dist
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -p -f 4 "$unsigned" "$aligned"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
+            --ks "$ANDROID_SYNC_KEYSTORE" --ks-key-alias "$ANDROID_SYNC_KEY_ALIAS" \
+            --ks-pass env:ANDROID_SYNC_SIGNING_PASSWORD \
+            --key-pass env:ANDROID_SYNC_SIGNING_PASSWORD \
+            --out dist/AndroidSync-localFull-signed.apk "$aligned"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/AndroidSync-localFull-signed.apk
+          sha256sum dist/AndroidSync-localFull-signed.apk
+      - name: Save signed build artifact
+        if: ${{ steps.signing.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: AndroidSync-signed-build
+          path: dist/AndroidSync-localFull-signed.apk
+          retention-days: 7
+          if-no-files-found: error
