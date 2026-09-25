@@ -127,6 +127,8 @@ fun TransferCard(transfer: TransferState, engine: SyncEngine) {
                 Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
                     StreamSensitive { Text(transfer.offer.files.first().name + if (transfer.offer.files.size > 1) " +${transfer.offer.files.size - 1} more" else "",fontWeight = FontWeight.SemiBold,style = MaterialTheme.typography.bodyMedium,maxLines = 1,overflow = TextOverflow.Ellipsis) }
                     Text("${if (transfer.incoming) "From" else "To"} $peer · ${transfer.offer.files.size} ${if (transfer.offer.files.size == 1) "file" else "files"}",style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant,maxLines = 1,overflow = TextOverflow.Ellipsis)
+                    if (transfer.offer.transport == "plain-binary") Text("Insecure Wi-Fi · unencrypted",style = MaterialTheme.typography.labelSmall,color = MaterialTheme.colorScheme.error)
+                    else if (transfer.offer.transport == "tls-binary") Text("Encrypted Wi-Fi",style = MaterialTheme.typography.labelSmall,color = MaterialTheme.colorScheme.tertiary)
                 }
                 if (showProgress) Text("${(fraction * 100).toInt()}%",style = MaterialTheme.typography.titleSmall,fontWeight = FontWeight.Bold)
                 else Text(transfer.status,style = MaterialTheme.typography.labelMedium,color = if (complete) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant)

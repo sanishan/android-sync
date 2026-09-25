@@ -2,6 +2,7 @@ package dev.androidsync
 
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
@@ -13,7 +14,10 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.selects.select
 import java.util.concurrent.atomic.AtomicReference
 
-class MacConnection(val peer: MacPeer, val socket: SSLSocket, val io: FrameIO, val protocolVersion: Int) : AutoCloseable {
+class MacConnection(
+    val peer: MacPeer, val socket: Socket, val io: FrameIO, val protocolVersion: Int,
+    val binaryFiles: Boolean = false, val plainFilePort: Int = 0, val insecure: Boolean = false
+) : AutoCloseable {
     private val outbound = Channel<List<Wire>>(256)
     private val latestRealtimeFrame = AtomicReference<List<Wire>?>(null)
     private val realtimeFrameReady = Channel<Unit>(Channel.CONFLATED)
@@ -55,6 +59,19 @@ class MacConnection(val peer: MacPeer, val socket: SSLSocket, val io: FrameIO, v
     override fun close() { latestRealtimeFrame.set(null); realtimeFrameReady.close(); outbound.close(); writer?.cancel(); runCatching { socket.close() } }
     companion object {
         fun openBulk(peer: MacPeer, store: SecureStore): MacConnection = runCatching { open(peer,store,"bulk") }.getOrElse { open(peer,store,"file") }
+        fun openPlainFile(peer: MacPeer, port: Int): MacConnection {
+            require(port in 1..65535)
+            val address = InetAddress.getByName(peer.host)
+            require(address.isSiteLocalAddress || address.isLinkLocalAddress || address.isLoopbackAddress) { "Use a local network address" }
+            val socket = Socket()
+            try {
+                socket.soTimeout = 35_000
+                socket.tcpNoDelay = true
+                socket.sendBufferSize = 256 * 1024
+                socket.connect(InetSocketAddress(address,port),8000)
+                return MacConnection(peer,socket,FrameIO(socket.inputStream,socket.outputStream),2,binaryFiles = true,plainFilePort = port,insecure = true)
+            } catch (e: Exception) { socket.close(); throw e }
+        }
         fun open(peer: MacPeer, store: SecureStore, stream: String, secret: String? = null): MacConnection {
             // Pin the invitation's complete DER certificate. No permissive trust manager or plaintext fallback.
             val trust = object : X509TrustManager {
@@ -84,7 +101,9 @@ class MacConnection(val peer: MacPeer, val socket: SSLSocket, val io: FrameIO, v
                 io.send(Wire(if (secret != null) "pair.request" else "auth.request",body,version = 1,sentAt = null))
                 val result = io.read(); require(result.type == "auth.ok") { "Pairing rejected. Generate a new invitation." }
                 val selected = result.body.optInt("protocol",1); require(selected in 1..2); io.protocolVersion = selected
-                return MacConnection(peer,socket,io,selected)
+                return MacConnection(peer,socket,io,selected,
+                    binaryFiles = result.body.optBoolean("binaryFiles",false),
+                    plainFilePort = result.body.optInt("plainFilePort",0))
             } catch (e: Exception) { socket.close(); throw e }
         }
     }

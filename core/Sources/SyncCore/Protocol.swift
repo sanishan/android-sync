@@ -71,6 +71,11 @@ public struct LogicalClock {
     public mutating func observe(_ remote: Int64) -> Int64 { value = max(value, max(0, remote)) + 1; return value }
     public var current: Int64 { value }
 }
+public enum FileTransportSettingOrder {
+    public static func shouldAdopt(revision: Int64, origin: String, currentRevision: Int64, currentOrigin: String) -> Bool {
+        revision > currentRevision || (revision == currentRevision && origin > currentOrigin)
+    }
+}
 public struct LineFramer {
     private var buffer = Data()
     public init() {}
@@ -164,12 +169,24 @@ public struct FileOffer: Codable, Identifiable, Equatable {
     public var id: String
     public var files: [SharedFile]
     public var targetPath: String?
-    public init(id: String = UUID().uuidString, files: [SharedFile], targetPath: String? = nil) { self.id = id; self.files = files; self.targetPath = targetPath }
+    /// Absent for peers that only understand the original JSON bulk lane.
+    public var transport: String?
+    /// A per-batch bearer token delivered only on the authenticated control lane.
+    public var transferToken: String?
+    public init(id: String = UUID().uuidString, files: [SharedFile], targetPath: String? = nil, transport: String? = nil, transferToken: String? = nil) {
+        self.id = id; self.files = files; self.targetPath = targetPath
+        self.transport = transport; self.transferToken = transferToken
+    }
     public func validate() throws {
         guard UUID(uuidString: id) != nil, !files.isEmpty, files.count <= 100, Set(files.map(\.id)).count == files.count else { throw ProtocolError.invalidFile }
         let relativePaths = files.compactMap(\.relativePath)
         guard Set(relativePaths).count == relativePaths.count else { throw ProtocolError.invalidFile }
         if let targetPath, !targetPath.isEmpty, !SyncRules.validSharedStoragePath(targetPath) { throw ProtocolError.invalidFile }
+        if let transport {
+            guard ["tls-binary", "plain-binary"].contains(transport),
+                  let transferToken, transferToken.count == 64,
+                  transferToken.allSatisfy({ $0.isHexDigit }) else { throw ProtocolError.invalidFile }
+        } else if transferToken != nil { throw ProtocolError.invalidFile }
         try files.forEach { try $0.validate() }
     }
 }

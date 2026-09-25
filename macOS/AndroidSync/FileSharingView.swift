@@ -130,6 +130,11 @@ struct FileTransferCard: View {
                 Text(transfer.incoming ? "Received" : "Sent").font(.caption).foregroundStyle(.secondary)
             }
             Text(transfer.status).font(.subheadline).foregroundStyle(transfer.status == "Completed" ? AppTheme.teal : Color.secondary)
+            if transfer.offer.transport == "plain-binary" {
+                Label("Insecure Wi-Fi · unencrypted", systemImage: "lock.open").font(.caption).foregroundStyle(.orange)
+            } else if transfer.offer.transport == "tls-binary" {
+                Label("Encrypted Wi-Fi", systemImage: "lock.shield").font(.caption).foregroundStyle(AppTheme.teal)
+            }
             if !finished { AppProgressBar(value: progress) }
             HStack {
                 Text("\(Int(progress * 100))% · \(ByteCountFormatter.string(fromByteCount: transfer.status == "Completed" ? transfer.total : transfer.bytes, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: transfer.total, countStyle: .file))")

@@ -507,7 +507,12 @@ private fun SetupScreen(state: EngineState, engine: SyncEngine, modifier: Modifi
         item { SettingRow(Icons.Outlined.BatterySaver, "Keep device connections active", if (state.enabled && state.batteryUnrestricted && state.backgroundSetupConfirmed) "Notifications, replies, and transfers can run in background" else "Complete ${DeviceCapabilities.powerGuide(engine.context).vendor} battery settings", state.enabled && state.batteryUnrestricted && state.backgroundSetupConfirmed) { openPower() } }
         item { SectionLabel("Optional") }
         item {
-            ToggleSetting(Icons.Outlined.FolderCopy, "File transfer", "Choose and receive files securely", state.fileTransferEnabled, engine::setFileTransferEnabled)
+            ToggleSetting(Icons.Outlined.FolderCopy, "File transfer", "Choose and receive file batches", state.fileTransferEnabled, engine::setFileTransferEnabled)
+        }
+        item {
+            ToggleSetting(Icons.Outlined.WarningAmber, "Insecure transfer (faster)",
+                "Files travel unencrypted over local Wi-Fi and can be seen by others on the network. Syncs with connected Macs.",
+                state.insecureFileTransfer, engine::setInsecureFileTransfer)
         }
         if (BuildConfig.LOCAL_FULL) item {
             SettingRow(Icons.Outlined.FolderOpen, "Browse shared storage from Mac", if (state.allFilesAccess) "Shared folders are available; app-private folders stay excluded" else "Optional All files access is required", state.allFilesAccess) { engine.openAllFilesSettings() }

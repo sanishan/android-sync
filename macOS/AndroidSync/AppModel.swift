@@ -38,6 +38,7 @@ import Combine
     @Published var receiveFolder: URL
     @Published var fileAlerts: Bool
     @Published var fileSounds: Bool
+    @Published private(set) var insecureFileTransfer = false
     @Published var askEveryTimeFiles: Set<String> = []
     @Published var remoteStorageEntries: [StorageEntry] = []
     @Published var remoteStoragePath = ""
@@ -84,6 +85,8 @@ import Combine
     private var identity: MacIdentity?
     private var history: EncryptedHistory?
     private var server: LocalServer?
+    private var fileTransportRevision: Int64 = 0
+    private var fileTransportOrigin = ""
     private var controls: [String: PeerConnection] = [:]
     private var seen = SeenEvents()
     private var secret = ""
@@ -124,6 +127,7 @@ import Combine
     }
     private var pendingRemoteDownloadRequests: [String: PendingRemoteDownload] = [:]
     private var pendingRemoteDownloadTransfers: [String: PendingRemoteDownload] = [:]
+    private var transferMeters: [String: (bytes: Int64, time: TimeInterval)] = [:]
     private var requestedGalleryThumbnails = Set<String>()
     private var mirrorRequestedAt = Date.distantPast
     private var mirrorFramesReceived = 0
@@ -141,6 +145,9 @@ import Combine
         receiveFolder = downloadsDirectory ?? Self.savedReceiveFolder()
         fileAlerts = UserDefaults.standard.object(forKey: "file-alerts") as? Bool ?? true
         fileSounds = UserDefaults.standard.object(forKey: "file-sounds") as? Bool ?? true
+        insecureFileTransfer = UserDefaults.standard.bool(forKey: "insecure-file-transfer")
+        fileTransportRevision = Int64(UserDefaults.standard.double(forKey: "file-transport-revision"))
+        fileTransportOrigin = UserDefaults.standard.string(forKey: "file-transport-origin") ?? ""
         clipboardQuotaBytes = (UserDefaults.standard.object(forKey: "clipboard-quota") as? NSNumber)?.int64Value ?? 1024 * 1024 * 1024
         super.init(); clipboardCount = pasteboard.changeCount
         if persistsPreferences && bluetoothCalls.selectedAddress != nil {
@@ -384,6 +391,43 @@ import Combine
         if value { askEveryTimeFiles.insert(phoneId) } else { askEveryTimeFiles.remove(phoneId) }
         save()
     }
+    func setInsecureFileTransfer(_ enabled: Bool) {
+        guard insecureFileTransfer != enabled else { return }
+        fileTransportRevision = max(fileTransportRevision + 1, Int64(Date().timeIntervalSince1970 * 1000))
+        fileTransportOrigin = macId
+        applyFileTransportSetting(enabled, revision: fileTransportRevision, origin: fileTransportOrigin, relay: true)
+    }
+    private func fileTransportMessage() -> WireMessage {
+        WireMessage("file.transport.setting", [
+            "insecure": insecureFileTransfer,
+            "revision": fileTransportRevision,
+            "origin": fileTransportOrigin
+        ], capability: "files")
+    }
+    private func applyFileTransportSetting(_ enabled: Bool, revision: Int64, origin: String, relay: Bool) {
+        guard revision >= 0, revision < Int64(Date().timeIntervalSince1970 * 1000) + 300_000,
+              origin.count <= 128 else { return }
+        if !relay {
+            guard FileTransportSettingOrder.shouldAdopt(revision: revision, origin: origin,
+                currentRevision: fileTransportRevision, currentOrigin: fileTransportOrigin) else { return }
+        }
+        let wasEnabled = insecureFileTransfer
+        insecureFileTransfer = enabled
+        fileTransportRevision = revision
+        fileTransportOrigin = origin
+        UserDefaults.standard.set(enabled, forKey: "insecure-file-transfer")
+        UserDefaults.standard.set(Double(revision), forKey: "file-transport-revision")
+        UserDefaults.standard.set(origin, forKey: "file-transport-origin")
+        if wasEnabled && !enabled { cancelPlainTransfers() }
+        for peer in controls.values { peer.send(fileTransportMessage()) }
+    }
+    private func cancelPlainTransfers() {
+        for transfer in transfers where transfer.offer.transport == "plain-binary" &&
+            !["Completed", "Cancelled", "Declined"].contains(transfer.status) {
+            cancelTransfer(transfer.id)
+        }
+        server?.closePlainStreams()
+    }
     private func persistPhones() {
         do { try Vault.put("trusted-phones", JSONEncoder().encode(phones)) } catch { self.error = error.localizedDescription }
     }
@@ -407,7 +451,7 @@ import Combine
         let offeredVersions = (b["versions"] as? [NSNumber])?.map(\.intValue) ?? [1]
         let selectedProtocol = offeredVersions.contains(2) ? 2 : 1
         peer.phoneId = phoneId; peer.stream = stream == "file" ? "bulk" : stream; peer.protocolVersion = selectedProtocol
-        peer.send(WireMessage("auth.ok", ["macId": macId, "name": Host.current().localizedName ?? "Mac", "protocol": selectedProtocol, "lanes": ["control", "bulk", "realtime"], "capabilities": ["notifications", "reply", "call.controls", "clipboard.text", "clipboard.image", "links", "files.resume", "files.storage", "files.gallery", "screen.h264", "remote.control", "media.controls"], "capabilitySet": ["capabilities": [
+        peer.send(WireMessage("auth.ok", ["macId": macId, "name": Host.current().localizedName ?? "Mac", "protocol": selectedProtocol, "lanes": ["control", "bulk", "realtime"], "binaryFiles": true, "plainFilePort": Int(server?.plainPort ?? 0), "capabilities": ["notifications", "reply", "call.controls", "clipboard.text", "clipboard.image", "links", "files.resume", "files.storage", "files.gallery", "files.binary", "screen.h264", "remote.control", "media.controls"], "capabilitySet": ["capabilities": [
             ["id": "notifications", "state": "enabled"], ["id": "clipboard", "state": "enabled"], ["id": "files", "state": "enabled"],
             ["id": "sms", "state": "permission_required"], ["id": "screen", "state": "supported"], ["id": "control", "state": "permission_required"], ["id": "media", "state": "supported"],
             ["id": "callControls", "state": "enabled", "reason": "Available when the active Android call notification exposes controls"],
@@ -416,6 +460,7 @@ import Combine
         peer.authenticated = true
         if stream == "control" {
             let old = controls.updateValue(peer, forKey: phoneId); old?.close(); connected.insert(phoneId)
+            peer.send(fileTransportMessage())
             for transfer in transfers where transfer.phoneId == phoneId && !["Completed", "Declined", "Cancelled"].contains(transfer.status) {
                 if transfer.incoming && transfer.accepted { peer.send(WireMessage("file.accept", ["transferId": transfer.id, "offsets": offsets(for: transfer)])) }
                 else if !transfer.incoming { peer.send(WireMessage("file.offer", WireMessage.object(transfer.offer))) }
@@ -424,8 +469,29 @@ import Combine
             peer.send(WireMessage("media.refresh",capability: "media"))
         }
     }
+    private func authenticatePlainFile(_ peer: PeerConnection, _ message: WireMessage) {
+        let b = message.body
+        guard insecureFileTransfer, ["file.put", "file.get"].contains(message.type),
+              let phoneId = b["phoneId"] as? String,
+              let id = b["transferId"] as? String,
+              let token = b["transferToken"] as? String,
+              let transfer = transfers.first(where: { $0.id == id && $0.phoneId == phoneId }),
+              transfer.offer.transport == "plain-binary",
+              transfer.offer.transferToken == token,
+              (transfer.accepted || (!transfer.incoming && message.type == "file.get")),
+              controls[phoneId] != nil, phones.contains(where: { $0.id == phoneId }) else { peer.close(); return }
+        peer.phoneId = phoneId
+        peer.stream = "bulk"
+        peer.protocolVersion = 2
+        peer.authenticated = true
+        handleFile(peer, message)
+    }
     private func handle(_ peer: PeerConnection, _ message: WireMessage) {
-        guard peer.authenticated else { authenticate(peer, message); return }
+        guard peer.authenticated else {
+            if peer.plain { authenticatePlainFile(peer, message) }
+            else { authenticate(peer, message) }
+            return
+        }
         guard let phoneId = peer.phoneId, phones.contains(where: { $0.id == phoneId }) else { peer.close(); return }
         if peer.stream == "bulk" { handleFile(peer, message); return }
         if peer.stream == "realtime" { handleRealtime(peer, message); return }
@@ -434,6 +500,11 @@ import Combine
         guard seen.insert(message.id) else { return }
         let b = message.body
         switch message.type {
+        case "file.transport.setting":
+            guard let enabled = b["insecure"] as? Bool,
+                  let revision = (b["revision"] as? NSNumber)?.int64Value,
+                  let origin = b["origin"] as? String else { return }
+            applyFileTransportSetting(enabled, revision: revision, origin: origin, relay: false)
         case "phone.status":
             let previousMessagesAccess = phoneStatuses[phoneId]?.messagesAccess
             let capabilityRows = ((b["capabilitySet"] as? [String: Any])?["capabilities"] as? [[String: Any]]) ?? []
@@ -448,7 +519,8 @@ import Combine
                 messagesPermissions: b["messagesPermissions"] as? Bool,
                 protocolVersion: (b["protocol"] as? NSNumber)?.intValue ?? message.version,
                 lanes: b["lanes"] as? [String] ?? ["control"],
-                capabilities: capabilities
+                capabilities: capabilities,
+                binaryFiles: b["binaryFiles"] as? Bool ?? false
             )
             if previousMessagesAccess != true && phoneStatuses[phoneId]?.messagesAccess == true {
                 loadCallHistory(phoneId: phoneId, reset: true)
@@ -524,6 +596,10 @@ import Combine
             if let link = b["url"] as? String, SyncRules.validWebURL(link) != nil { receivedLinks.insert(link, at: 0); receivedLinks = Array(receivedLinks.prefix(30)); showSimpleAlert("Link received", text: "Open Android Sync to view it.") }
         case "file.offer":
             guard let offer = try? message.decode(FileOffer.self), (try? offer.validate()) != nil else { peer.close(); return }
+            if offer.transport == "plain-binary" && !insecureFileTransfer {
+                peer.send(WireMessage("file.decline", ["transferId": offer.id, "reason": "Insecure transfer is off."]))
+                return
+            }
             if let existing = transfers.first(where: { $0.id == offer.id }) {
                 guard existing.phoneId == phoneId, existing.offer == offer, existing.incoming else { peer.close(); return }
                 if existing.accepted { peer.send(WireMessage("file.accept", ["transferId": offer.id, "offsets": offsets(for: existing)])) }
@@ -1396,10 +1472,17 @@ extension AppModel {
         let phoneId = requestedPhoneId ?? controls.keys.sorted().first
         guard let phoneId, controls[phoneId] != nil, history != nil else { error = "Connect your phone before sending files."; return }
         guard !urls.isEmpty, urls.count <= 100 else { error = "Choose up to 100 files per batch."; return }
+        if insecureFileTransfer && (phoneStatuses[phoneId]?.binaryFiles != true || server?.plainPort == 0) {
+            error = "Insecure Wi-Fi transfer is unavailable on this Mac. Turn the setting off to use encrypted transfers."
+            return
+        }
         preparingFiles = true
         let directory = stagingDirectory
         Task {
             do {
+                let mode: String? = phoneStatuses[phoneId]?.binaryFiles == true
+                    ? (insecureFileTransfer ? "plain-binary" : "tls-binary") : nil
+                let token = mode == nil ? nil : SyncRules.hex(try Vault.random(32))
                 let prepared: (FileOffer, [String: String]) = try await Task.detached {
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                     var files: [SharedFile] = []; var paths: [String: String] = [:]
@@ -1417,7 +1500,8 @@ extension AppModel {
                         let file = SharedFile(id: id, name: url.lastPathComponent, size: size, sha256: try SyncRules.fileHash(copy), mime: "application/octet-stream")
                         try file.validate(); files.append(file); paths[id] = copy.path
                     }
-                    let offer = FileOffer(files: files,targetPath: targetPath); try offer.validate(); succeeded = true; return (offer, paths)
+                    let offer = FileOffer(files: files,targetPath: targetPath,transport: mode,transferToken: token)
+                    try offer.validate(); succeeded = true; return (offer, paths)
                 }.value
                 let record = TransferRecord(offer: prepared.0, phoneId: phoneId, incoming: false, status: "Awaiting phone acceptance", sourcePaths: prepared.1)
                 transfers.insert(record, at: 0); save(); controls[phoneId]?.send(WireMessage("file.offer", WireMessage.object(prepared.0)))
@@ -1463,11 +1547,19 @@ extension AppModel {
     }
     private func updateProgress(_ index: Int, fileId: String, offset: Int64) {
         let completed = transfers[index].offer.files.filter { transfers[index].completed.contains($0.id) && $0.id != fileId }.reduce(Int64(0)) { $0 + $1.size }
-        transfers[index].bytes = completed + offset
-        if let started = transfers[index].startedAt {
-            let elapsed = max(0.25,Date().timeIntervalSince(started))
-            transfers[index].speedBytesPerSecond = Int64(Double(transfers[index].bytes) / elapsed)
+        let bytes = completed + offset
+        let id = transfers[index].id
+        let now = Date().timeIntervalSince1970
+        if let meter = transferMeters[id] {
+            let elapsed = now - meter.time
+            if elapsed >= 0.25 {
+                transfers[index].speedBytesPerSecond = Int64(Double(max(0, bytes - meter.bytes)) / elapsed)
+                transferMeters[id] = (bytes, now)
+            }
+        } else {
+            transferMeters[id] = (bytes, now)
         }
+        transfers[index].bytes = bytes
     }
     private func handleFile(_ peer: PeerConnection, _ message: WireMessage) {
         let b = message.body
@@ -1478,11 +1570,25 @@ extension AppModel {
             }
             if ["file.put", "file.get"].contains(message.type) {
                 guard peer.transferId == nil, let id = b["transferId"] as? String, let fileId = b["fileId"] as? String,
-                      let i = transfers.firstIndex(where: { $0.id == id && $0.phoneId == peer.phoneId && $0.accepted }),
+                      let i = transfers.firstIndex(where: { $0.id == id && $0.phoneId == peer.phoneId }),
                       let file = transfers[i].offer.files.first(where: { $0.id == fileId }) else { peer.close(); return }
                 guard transfers[i].incoming == (message.type == "file.put") else { peer.close(); return }
+                if !transfers[i].accepted && !transfers[i].incoming && message.type == "file.get" {
+                    // The phone's authenticated pull can arrive before its
+                    // acceptance event on the separate control connection.
+                    transfers[i].accepted = true
+                    transfers[i].status = "Sending"
+                    transfers[i].startedAt = transfers[i].startedAt ?? Date()
+                }
+                guard transfers[i].accepted else { peer.close(); return }
+                let binary = b["binary"] as? Bool == true
+                guard (transfers[i].offer.transport == nil && !binary && !peer.plain) ||
+                      (transfers[i].offer.transport == "tls-binary" && binary && !peer.plain) ||
+                      (transfers[i].offer.transport == "plain-binary" && binary && peer.plain && insecureFileTransfer) else {
+                    throw ProtocolError.invalidFile
+                }
                 try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-                peer.transferId = id; peer.fileId = fileId
+                peer.transferId = id; peer.fileId = fileId; peer.fileBinary = binary
                 if message.type == "file.put" {
                     if transfers[i].completed.contains(fileId) { peer.sendAndClose(WireMessage("file.saved", ["fileId": fileId])); return }
                     let url = partialURL(id, fileId)
@@ -1495,44 +1601,45 @@ extension AppModel {
                     let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path)); try handle.seek(toOffset: UInt64(offset))
                     peer.fileHandle = handle; peer.fileOffset = offset; transfers[i].status = "Sending"
                 }
-                peer.send(WireMessage("file.ready", ["offset": peer.fileOffset, "fileId": fileId])); save(); return
+                let remaining = file.size - peer.fileOffset
+                if binary && message.type == "file.put" {
+                    peer.onRawProgress = { [weak self] stream in
+                        guard let self, let index = self.transfers.firstIndex(where: { $0.id == id && $0.accepted }) else { stream.close(); return }
+                        self.updateProgress(index, fileId: fileId, offset: stream.fileOffset)
+                    }
+                    peer.onRawComplete = { [weak self] stream in self?.finishIncomingFile(stream,id: id,fileId: fileId) }
+                }
+                peer.send(WireMessage("file.ready", ["offset": peer.fileOffset, "fileId": fileId])) { [weak self] sent in
+                    guard sent, let self else { peer.close(); return }
+                    if binary && message.type == "file.put" { peer.receiveRaw(remaining) }
+                    else if binary && message.type == "file.get", let handle = peer.fileHandle {
+                        var lastUpdate = Date.distantPast
+                        peer.sendRawFile(handle, remaining: remaining, progress: { bytes in
+                            peer.fileOffset += Int64(bytes)
+                            if Date().timeIntervalSince(lastUpdate) >= 0.25 || peer.fileOffset == file.size {
+                                lastUpdate = Date()
+                                if let index = self.transfers.firstIndex(where: { $0.id == id && $0.accepted }) {
+                                    self.updateProgress(index, fileId: fileId, offset: peer.fileOffset)
+                                }
+                            }
+                        }, completion: { okay in if !okay { peer.close() } })
+                    }
+                }
+                save(); return
             }
             guard let id = peer.transferId, let fileId = peer.fileId, let i = transfers.firstIndex(where: { $0.id == id && $0.accepted && $0.phoneId == peer.phoneId }),
                   let file = transfers[i].offer.files.first(where: { $0.id == fileId }) else { peer.close(); return }
             switch message.type {
             case "file.chunk":
-                guard transfers[i].incoming, let handle = peer.fileHandle, let offset = b["offset"] as? Int64, offset == peer.fileOffset,
+                guard !peer.fileBinary, transfers[i].incoming, let handle = peer.fileHandle, let offset = b["offset"] as? Int64, offset == peer.fileOffset,
                       let base64 = b["data"] as? String, let data = Data(base64Encoded: base64), !data.isEmpty, data.count <= 65536, offset + Int64(data.count) <= file.size else { throw ProtocolError.invalidFile }
                 try handle.write(contentsOf: data); peer.fileOffset += Int64(data.count); updateProgress(i, fileId: fileId, offset: peer.fileOffset)
                 peer.send(WireMessage("file.progress", ["offset": peer.fileOffset]))
             case "file.end":
-                guard transfers[i].incoming, peer.fileOffset == file.size else { throw ProtocolError.invalidFile }
-                try peer.fileHandle?.synchronize(); try peer.fileHandle?.close(); peer.fileHandle = nil
-                let partial = partialURL(id, fileId)
-                transfers[i].status = "Verifying"
-                Task {
-                    do {
-                        let hash = try await Task.detached { try SyncRules.fileHash(partial) }.value
-                        guard let index = self.transfers.firstIndex(where: { $0.id == id && $0.accepted }) else { peer.close(); return }
-                        guard hash == file.sha256 else { try? FileManager.default.removeItem(at: partial); throw StoreError(detail: "File integrity check failed. Resume to retry.") }
-                        let downloads = URL(fileURLWithPath: self.transfers[index].receiveFolderPath ?? self.receiveFolder.path, isDirectory: true)
-                        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
-                        let destination = try self.destination(for: file,in: downloads)
-                        try FileManager.default.moveItem(at: partial, to: destination)
-                        self.transfers[index].completed.append(fileId); self.transfers[index].savedPaths[fileId] = destination.path
-                        self.updateProgress(index, fileId: fileId, offset: file.size)
-                        if self.transfers[index].completed.count == self.transfers[index].offer.files.count {
-                            self.transfers[index].status = "Completed"; self.transfers[index].speedBytesPerSecond = 0; self.controls[self.transfers[index].phoneId]?.send(WireMessage("file.complete", ["transferId": id]))
-                            self.notifyTransferCompletion(id)
-                        } else { self.transfers[index].status = "Receiving" }
-                        self.save(); peer.sendAndClose(WireMessage("file.saved", ["fileId": fileId]))
-                    } catch {
-                        if let index = self.transfers.firstIndex(where: { $0.id == id }) { self.transfers[index].status = "Failed — \(error.localizedDescription)"; self.notifyTransferFailure(id); self.save() }
-                        peer.close()
-                    }
-                }
+                guard !peer.fileBinary, transfers[i].incoming, peer.fileOffset == file.size else { throw ProtocolError.invalidFile }
+                finishIncomingFile(peer,id: id,fileId: fileId)
             case "file.next":
-                guard !transfers[i].incoming, let handle = peer.fileHandle, b["offset"] as? Int64 == peer.fileOffset else { throw ProtocolError.invalidFile }
+                guard !peer.fileBinary, !transfers[i].incoming, let handle = peer.fileHandle, b["offset"] as? Int64 == peer.fileOffset else { throw ProtocolError.invalidFile }
                 if let data = try handle.read(upToCount: 65536), !data.isEmpty {
                     let offset = peer.fileOffset; peer.fileOffset += Int64(data.count); updateProgress(i, fileId: fileId, offset: peer.fileOffset)
                     peer.send(WireMessage("file.chunk", ["offset": offset, "data": data.base64EncodedString()]))
@@ -1552,6 +1659,47 @@ extension AppModel {
                 save()
             }
             peer.close()
+        }
+    }
+    private func finishIncomingFile(_ peer: PeerConnection, id: String, fileId: String) {
+        guard let i = transfers.firstIndex(where: { $0.id == id && $0.accepted }),
+              let file = transfers[i].offer.files.first(where: { $0.id == fileId }),
+              peer.fileOffset == file.size else { peer.close(); return }
+        let handle = peer.fileHandle
+        peer.fileHandle = nil
+        let partial = partialURL(id, fileId)
+        transfers[i].status = "Verifying"
+        Task {
+            do {
+                let hash = try await Task.detached {
+                    try handle?.synchronize()
+                    try handle?.close()
+                    return try SyncRules.fileHash(partial)
+                }.value
+                guard let index = self.transfers.firstIndex(where: { $0.id == id && $0.accepted }) else { peer.close(); return }
+                guard hash == file.sha256 else {
+                    try? FileManager.default.removeItem(at: partial)
+                    throw StoreError(detail: "File integrity check failed. Resume to retry.")
+                }
+                let downloads = URL(fileURLWithPath: self.transfers[index].receiveFolderPath ?? self.receiveFolder.path, isDirectory: true)
+                try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+                let destination = try self.destination(for: file,in: downloads)
+                try await Task.detached { try FileManager.default.moveItem(at: partial, to: destination) }.value
+                self.transfers[index].completed.append(fileId); self.transfers[index].savedPaths[fileId] = destination.path
+                self.updateProgress(index, fileId: fileId, offset: file.size)
+                if self.transfers[index].completed.count == self.transfers[index].offer.files.count {
+                    self.transfers[index].status = "Completed"; self.transfers[index].speedBytesPerSecond = 0
+                    self.controls[self.transfers[index].phoneId]?.send(WireMessage("file.complete", ["transferId": id]))
+                    self.notifyTransferCompletion(id)
+                } else { self.transfers[index].status = "Receiving" }
+                self.save(); peer.sendAndClose(WireMessage("file.saved", ["fileId": fileId]))
+            } catch {
+                if let index = self.transfers.firstIndex(where: { $0.id == id }) {
+                    self.transfers[index].status = "Failed — \(error.localizedDescription)"
+                    self.notifyTransferFailure(id); self.save()
+                }
+                peer.close()
+            }
         }
     }
     private func uniqueDestination(in folder: URL, name: String) -> URL {

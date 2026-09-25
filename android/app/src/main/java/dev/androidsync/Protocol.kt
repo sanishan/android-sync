@@ -41,6 +41,8 @@ class LogicalClock(initial: Long = 0) {
     @Synchronized fun observe(remote: Long): Long { value = maxOf(value, remote.coerceAtLeast(0)) + 1; return value }
     @Synchronized fun current(): Long = value
 }
+fun shouldAdoptFileTransportSetting(revision: Long, origin: String, currentRevision: Long, currentOrigin: String): Boolean =
+    revision > currentRevision || (revision == currentRevision && origin > currentOrigin)
 data class Wire(
     val type: String,
     val body: JSONObject = JSONObject(),
@@ -82,6 +84,15 @@ class FrameIO(input: InputStream, private val output: OutputStream) {
     private val input = BufferedInputStream(input)
     @Volatile var protocolVersion: Int = 2
     @Synchronized fun send(wire: Wire) { output.write(wire.bytes(protocolVersion)); output.flush() }
+    @Synchronized fun writeRaw(bytes: ByteArray, length: Int) {
+        require(length in 0..bytes.size)
+        output.write(bytes, 0, length)
+    }
+    @Synchronized fun flushRaw() { output.flush() }
+    fun readRaw(bytes: ByteArray, length: Int): Int {
+        require(length in 1..bytes.size)
+        return input.read(bytes, 0, length)
+    }
     fun read(): Wire {
         val out = java.io.ByteArrayOutputStream()
         while (true) {
@@ -109,10 +120,18 @@ data class SharedFile(val id: String, val name: String, val size: Long, val sha2
     fun json() = obj("id" to id,"name" to name,"size" to size,"sha256" to sha256,"mime" to mime,"relativePath" to relativePath)
     companion object { fun parse(o: JSONObject) = SharedFile(o.getString("id"),o.getString("name"),o.getLong("size"),o.getString("sha256"),o.optString("mime","application/octet-stream"),o.optString("relativePath").takeIf { o.has("relativePath") && !o.isNull("relativePath") && it.isNotBlank() }).also { it.validate() } }
 }
-data class FileOffer(val id: String, val files: List<SharedFile>, val targetPath: String? = null) {
-    fun validate() { UUID.fromString(id); require(files.isNotEmpty() && files.size <= 100 && files.map { it.id }.distinct().size == files.size); require(files.mapNotNull { it.relativePath }.distinct().size == files.count { it.relativePath != null }); files.forEach { it.validate() }; targetPath?.let { require(it.isEmpty() || normalizeSharedStoragePath(it) == it.trim().trim('/').replace('\\','/')) } }
-    fun json() = obj("id" to id,"files" to array(files.map { it.json() }),"targetPath" to targetPath)
-    companion object { fun parse(o: JSONObject): FileOffer { val a = o.getJSONArray("files"); return FileOffer(o.getString("id"),(0 until a.length()).map { SharedFile.parse(a.getJSONObject(it)) },o.optString("targetPath").takeIf { o.has("targetPath") && !o.isNull("targetPath") }).also { it.validate() } } }
+data class FileOffer(val id: String, val files: List<SharedFile>, val targetPath: String? = null, val transport: String? = null, val transferToken: String? = null) {
+    fun validate() {
+        UUID.fromString(id)
+        require(files.isNotEmpty() && files.size <= 100 && files.map { it.id }.distinct().size == files.size)
+        require(files.mapNotNull { it.relativePath }.distinct().size == files.count { it.relativePath != null })
+        files.forEach { it.validate() }
+        targetPath?.let { require(it.isEmpty() || normalizeSharedStoragePath(it) == it.trim().trim('/').replace('\\','/')) }
+        if (transport != null) require(transport in listOf("tls-binary","plain-binary") && transferToken?.matches(Regex("[0-9a-fA-F]{64}")) == true)
+        else require(transferToken == null)
+    }
+    fun json() = obj("id" to id,"files" to array(files.map { it.json() }),"targetPath" to targetPath,"transport" to transport,"transferToken" to transferToken)
+    companion object { fun parse(o: JSONObject): FileOffer { val a = o.getJSONArray("files"); return FileOffer(o.getString("id"),(0 until a.length()).map { SharedFile.parse(a.getJSONObject(it)) },o.optString("targetPath").takeIf { o.has("targetPath") && !o.isNull("targetPath") },o.optString("transport").takeIf { o.has("transport") && !o.isNull("transport") },o.optString("transferToken").takeIf { o.has("transferToken") && !o.isNull("transferToken") }).also { it.validate() } } }
 }
 
 data class StorageEntry(val path: String, val name: String, val directory: Boolean, val size: Long, val modified: Long, val mime: String) {

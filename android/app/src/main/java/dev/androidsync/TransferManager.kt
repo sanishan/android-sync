@@ -12,16 +12,38 @@ import kotlinx.coroutines.*
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
+import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 class TransferManager(private val engine: SyncEngine) {
+    private val random = SecureRandom()
     private val directory = File(engine.context.filesDir,"transfers").apply { mkdirs() }
     private val jobs = ConcurrentHashMap<String,Job>()
     private val streams = ConcurrentHashMap<String,MacConnection>()
     private data class Meter(var bytes: Long, var time: Long)
     private val meters = ConcurrentHashMap<String,Meter>()
     private fun partial(id: String, fileId: String) = File(directory,"$id-$fileId.part")
+    private fun transportFor(macId: String): Pair<String?,String?> {
+        val connection = engine.connections[macId] ?: run {
+            require(!engine.state.value.insecureFileTransfer) {
+                "Connect to this Mac before starting an insecure Wi-Fi transfer."
+            }
+            return null to null
+        }
+        if (!connection.binaryFiles) {
+            require(!engine.state.value.insecureFileTransfer) {
+                "Insecure Wi-Fi transfer is unavailable on this Mac. Turn the setting off to use encrypted transfers."
+            }
+            return null to null
+        }
+        if (engine.state.value.insecureFileTransfer) require(connection.plainFilePort > 0) {
+            "Insecure Wi-Fi transfer is unavailable on this Mac. Turn the setting off to use encrypted transfers."
+        }
+        val mode = if (engine.state.value.insecureFileTransfer) "plain-binary" else "tls-binary"
+        val token = ByteArray(32).also(random::nextBytes).hex()
+        return mode to token
+    }
     fun cleanupTerminal() {
         engine.state.value.transfers.filter { it.status in listOf("Completed","Cancelled","Declined") }.forEach { transfer ->
             transfer.offer.files.forEach { file ->
@@ -59,7 +81,8 @@ class TransferManager(private val engine: SyncEngine) {
                 sources[id] = source.path
                 SharedFile(id,safeName,source.length(),source.inputStream().use { sha256(it) },resolver.getType(uri) ?: "application/octet-stream").also { it.validate() }
             }
-            val offer = FileOffer(UUID.randomUUID().toString(),files).also { it.validate() }
+            val (mode,token) = transportFor(macId)
+            val offer = FileOffer(UUID.randomUUID().toString(),files,transport = mode,transferToken = token).also { it.validate() }
             engine.addTransfer(TransferState(offer,macId,false,"Awaiting Mac acceptance",sources = sources))
             if (announce) engine.send(macId,Wire("file.offer",offer.json(),capability = "files"))
             return offer
@@ -79,13 +102,18 @@ class TransferManager(private val engine: SyncEngine) {
             sources[id] = source.path
             SharedFile(id,source.name.take(240),source.length(),source.inputStream().use(::sha256),"application/octet-stream",relativePaths[source.canonicalPath]).also { it.validate() }
         }
-        val offer = FileOffer(UUID.randomUUID().toString(),files).also { it.validate() }
+        val (mode,token) = transportFor(macId)
+        val offer = FileOffer(UUID.randomUUID().toString(),files,transport = mode,transferToken = token).also { it.validate() }
         engine.addTransfer(TransferState(offer,macId,false,"Awaiting Mac acceptance",sources = sources))
         if (announce) engine.send(macId,Wire("file.offer",offer.json(),capability = "files"))
         return offer
     }
     fun receiveOffer(connection: MacConnection, offer: FileOffer) {
         if (!engine.state.value.fileTransferEnabled) { engine.send(connection.peer.id,Wire("file.decline",obj("transferId" to offer.id))); return }
+        if (offer.transport == "plain-binary" && (!engine.state.value.insecureFileTransfer || connection.plainFilePort == 0)) {
+            engine.send(connection.peer.id,Wire("file.decline",obj("transferId" to offer.id,"reason" to "Insecure transfer is off or unavailable.")))
+            return
+        }
         val existing = engine.transfer(offer.id)
         if (existing != null) {
             require(existing.macId == connection.peer.id && existing.incoming && existing.offer == offer)
@@ -144,29 +172,49 @@ class TransferManager(private val engine: SyncEngine) {
         jobs[id] = job; job.start()
     }
     private fun ensureAccepted(id: String): TransferState = engine.transfer(id)?.also { check(it.accepted && it.status !in listOf("Cancelled","Declined")) } ?: error("Transfer no longer exists")
+    private fun openFileConnection(transfer: TransferState, peer: MacPeer): MacConnection {
+        return if (transfer.offer.transport == "plain-binary") {
+            require(engine.state.value.insecureFileTransfer)
+            val port = engine.connections[peer.id]?.plainFilePort ?: 0
+            MacConnection.openPlainFile(peer,port)
+        } else MacConnection.openBulk(peer,engine.store)
+    }
+    private fun fileRequest(type: String, transfer: TransferState, file: SharedFile, offset: Long? = null): Wire {
+        val body = obj("transferId" to transfer.offer.id,"fileId" to file.id)
+        if (offset != null) body.put("offset",offset)
+        if (transfer.offer.transport != null) body.put("binary",true)
+        if (transfer.offer.transport == "plain-binary") {
+            body.put("phoneId",engine.store.phoneId)
+            body.put("transferToken",transfer.offer.transferToken)
+        }
+        return Wire(type,body)
+    }
     private suspend fun upload(id: String, peer: MacPeer) {
         val transfer = ensureAccepted(id)
         for (file in transfer.offer.files) {
             currentCoroutineContext().ensureActive(); ensureAccepted(id)
             val source = File(transfer.sources[file.id] ?: error("Source unavailable")); require(source.isFile)
-            MacConnection.openBulk(peer,engine.store).use { connection ->
+            openFileConnection(transfer,peer).use { connection ->
                 streams[id] = connection
-                connection.io.send(Wire("file.put",obj("transferId" to id,"fileId" to file.id)))
+                connection.io.send(fileRequest("file.put",transfer,file))
                 val ready = connection.io.read()
                 if (ready.type == "file.saved") { completeFile(id,file); return@use }
                 require(ready.type == "file.ready")
                 var offset = ready.body.getLong("offset"); require(offset in 0..file.size)
                 RandomAccessFile(source,"r").use { handle ->
-                    handle.seek(offset); val buffer = ByteArray(CHUNK_SIZE)
+                    handle.seek(offset); val buffer = ByteArray(if (transfer.offer.transport == null) CHUNK_SIZE else 256 * 1024)
                     while (offset < file.size) {
                         currentCoroutineContext().ensureActive(); ensureAccepted(id)
                         val n = handle.read(buffer,0,minOf(buffer.size.toLong(),file.size-offset).toInt()); require(n > 0)
-                        connection.io.send(Wire("file.chunk",obj("offset" to offset,"data" to Base64.encodeToString(buffer.copyOf(n),Base64.NO_WRAP))))
-                        val progress = connection.io.read(); require(progress.type == "file.progress" && progress.body.getLong("offset") == offset+n)
+                        if (transfer.offer.transport == null) {
+                            connection.io.send(Wire("file.chunk",obj("offset" to offset,"data" to Base64.encodeToString(buffer.copyOf(n),Base64.NO_WRAP))))
+                            val progress = connection.io.read(); require(progress.type == "file.progress" && progress.body.getLong("offset") == offset+n)
+                        } else connection.io.writeRaw(buffer,n)
                         offset += n; progress(id,file.id,offset)
                     }
                 }
-                connection.io.send(Wire("file.end",obj("fileId" to file.id)))
+                if (transfer.offer.transport == null) connection.io.send(Wire("file.end",obj("fileId" to file.id)))
+                else { connection.io.flushRaw(); connection.socket.soTimeout = 20 * 60_000 }
                 val saved = connection.io.read(); require(saved.type == "file.saved")
                 completeFile(id,file)
             }
@@ -183,14 +231,27 @@ class TransferManager(private val engine: SyncEngine) {
             if (engine.transfer(id)?.completed?.contains(file.id) == true) continue
             val partial = partial(id,file.id)
             if (partial.length() > file.size) partial.delete()
-            MacConnection.openBulk(peer,engine.store).use { connection ->
+            openFileConnection(transfer,peer).use { connection ->
                 streams[id] = connection; var offset = partial.length()
-                connection.io.send(Wire("file.get",obj("transferId" to id,"fileId" to file.id,"offset" to offset)))
+                connection.io.send(fileRequest("file.get",transfer,file,offset))
                 val ready = connection.io.read(); require(ready.type == "file.ready" && ready.body.getLong("offset") == offset)
                 RandomAccessFile(partial,"rw").use { handle ->
                     handle.seek(offset)
+                    var nextCheckpoint = (offset / (8L * 1024 * 1024) + 1) * (8L * 1024 * 1024)
+                    val buffer = ByteArray(256 * 1024)
                     while (true) {
                         currentCoroutineContext().ensureActive(); ensureAccepted(id)
+                        if (transfer.offer.transport != null) {
+                            if (offset == file.size) break
+                            val n = connection.io.readRaw(buffer,minOf(buffer.size.toLong(),file.size-offset).toInt())
+                            if (n < 0) throw IOException("File connection closed")
+                            handle.write(buffer,0,n); offset += n; progress(id,file.id,offset)
+                            if (offset >= nextCheckpoint) {
+                                handle.fd.sync()
+                                nextCheckpoint = (offset / (8L * 1024 * 1024) + 1) * (8L * 1024 * 1024)
+                            }
+                            continue
+                        }
                         connection.io.send(Wire("file.next",obj("offset" to offset)))
                         val message = connection.io.read()
                         if (message.type == "file.end") break
@@ -249,9 +310,13 @@ class TransferManager(private val engine: SyncEngine) {
         }
     }
     private fun progress(id: String, fileId: String, offset: Long) {
+        val now = SystemClock.elapsedRealtime()
+        val previous = meters[id]
+        val fileSize = engine.transfer(id)?.offer?.files?.firstOrNull { it.id == fileId }?.size
+        if (previous != null && now - previous.time < 250 && offset != fileSize) return
         engine.updateTransfer(id,false) { current ->
             val bytes = current.offer.files.filter { it.id in current.completed && it.id != fileId }.sumOf { it.size } + offset
-            val now = SystemClock.elapsedRealtime(); val meter = meters.getOrPut(id) { Meter(bytes,now) }
+            val meter = meters.getOrPut(id) { Meter(bytes,now) }
             val elapsed = now - meter.time
             val speed = if (elapsed >= 250) ((bytes - meter.bytes).coerceAtLeast(0) * 1000 / elapsed).also { meter.bytes = bytes; meter.time = now } else current.speedBytesPerSecond
             current.copy(bytes = bytes,speedBytesPerSecond = speed)
@@ -262,6 +327,14 @@ class TransferManager(private val engine: SyncEngine) {
     fun remoteCancel(macId: String, id: String, decline: Boolean) { val t = engine.transfer(id) ?: return; require(t.macId == macId); engine.updateTransfer(id) { it.copy(status = if (decline) "Declined" else "Cancelled",accepted = false) }; interrupt(id) }
     fun resume(id: String) { val t = engine.transfer(id) ?: return; if (t.incoming) acceptIncoming(id) else { engine.updateTransfer(id) { it.copy(status = "Awaiting Mac acceptance",accepted = false) }; engine.send(t.macId,Wire("file.offer",t.offer.json())) } }
     private fun interrupt(id: String) { streams.remove(id)?.close(); jobs.remove(id)?.cancel() }
+    fun interruptPlain() {
+        streams.entries.filter { it.value.insecure }.map { it.key }.forEach { id ->
+            val transfer = engine.transfer(id) ?: return@forEach
+            engine.updateTransfer(id) { it.copy(status = "Cancelled",accepted = false,speedBytesPerSecond = 0) }
+            interrupt(id)
+            engine.send(transfer.macId,Wire("file.cancel",obj("transferId" to id)))
+        }
+    }
     fun interruptMac(macId: String) { engine.state.value.transfers.filter { it.macId == macId && it.status !in listOf("Completed","Cancelled","Declined") }.forEach { interrupt(it.offer.id); if (it.accepted) engine.updateTransfer(it.offer.id) { t -> t.copy(status = "Interrupted — reconnect or resume") } } }
     fun interruptAll() { jobs.keys.toList().forEach { interrupt(it) } }
 }

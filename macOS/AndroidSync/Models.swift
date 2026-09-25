@@ -35,6 +35,7 @@ struct PhoneSyncStatus {
     var protocolVersion: Int = 1
     var lanes: [String] = ["control"]
     var capabilities: [String: String] = [:]
+    var binaryFiles = false
 }
 struct ClipboardImageSource {
     var url: URL

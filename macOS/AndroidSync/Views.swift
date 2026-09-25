@@ -878,6 +878,11 @@ struct SettingsView: View {
             }
             GroupBox("File transfers") {
                 VStack(alignment: .leading, spacing: 14) {
+                    Toggle("Insecure transfer (faster)", isOn: Binding(
+                        get: { model.insecureFileTransfer },
+                        set: { model.setInsecureFileTransfer($0) }
+                    ))
+                    Text("Transfers files without encryption over local Wi-Fi. Anyone with access to the network may see them. This switch syncs with connected Android devices; leave it off for encrypted transfers.").font(.caption).foregroundStyle(.secondary)
                     Text("Save newly accepted batches to").font(.subheadline.weight(.semibold))
                     Text(model.receiveFolder.path).font(.callout).textSelection(.enabled).foregroundStyle(.secondary).streamSensitive()
                     HStack { Button("Choose folder…") { model.chooseReceiveFolder() }; Button("Use Downloads") { model.resetReceiveFolder() } }
@@ -896,7 +901,7 @@ struct SettingsView: View {
                             }
                         }
                     Text("Blur messages, numbers, clipboard content, photos, file names, and pairing QR codes in public or while recording. Native alerts show only the source app and a hidden-content notice. Hover over one item to reveal it temporarily on this Mac. Turning this on clears earlier Android Sync alerts from Notification Center.").font(.caption).foregroundStyle(.secondary)
-                    Label("Direct TLS 1.3 connection", systemImage: "lock.shield")
+                    Label("Paired control connection uses TLS 1.3", systemImage: "lock.shield")
                     Text("Notifications expire after seven days. Clipboard history and image data are encrypted locally and remain available until you clear them. Trusted devices auto-accept file batches unless Ask every time is enabled for that device.").foregroundStyle(.secondary)
                     Button("Clear notification history", role: .destructive) { model.clearHistory() }
                     Button("Export redacted diagnostics…") { model.exportRedactedDiagnostics() }

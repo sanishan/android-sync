@@ -55,6 +55,7 @@ data class EngineState(
     val notificationAccess: Boolean = false, val listenerConnected: Boolean = false, val postingNotifications: Boolean = false,
     val batteryUnrestricted: Boolean = false, val backgroundSetupConfirmed: Boolean = false,
     val onboardingComplete: Boolean = false, val fileTransferEnabled: Boolean = true, val allFilesAccess: Boolean = false,
+    val insecureFileTransfer: Boolean = false,
     val streamModeEnabled: Boolean = false,
     val askEveryTimeFiles: Set<String> = emptySet(), val messageDevices: Set<String> = emptySet(), val messagePermissions: Boolean = false,
     val screenDevices: Set<String> = emptySet(), val controlDevices: Set<String> = emptySet(),
@@ -70,6 +71,8 @@ class SyncEngine(val context: Context) {
     private val mutable = MutableStateFlow(EngineState())
     val state = mutable.asStateFlow()
     val connections = ConcurrentHashMap<String,MacConnection>()
+    private var fileTransportRevision = 0L
+    private var fileTransportOrigin = ""
     private val connectionJobs = ConcurrentHashMap<String,Job>()
     private val pairingConnections = ConcurrentHashMap<String,MacConnection>()
     val discovery = Discovery(context) {}
@@ -131,8 +134,11 @@ class SyncEngine(val context: Context) {
                 onboardingComplete = store.get("onboarding-complete") == "true",
                 backgroundSetupConfirmed = store.get("background-setup-confirmed") == "true" || store.get("samsung-setup-confirmed") == "true",
                 fileTransferEnabled = store.get("file-transfer-enabled") != "false",
+                insecureFileTransfer = store.get("insecure-file-transfer") == "true",
                 streamModeEnabled = store.get("stream-mode-enabled") == "true"
             )
+            fileTransportRevision = store.get("file-transport-revision")?.toLongOrNull() ?: 0L
+            fileTransportOrigin = store.get("file-transport-origin") ?: ""
             fileManager.cleanupTerminal()
         }.onFailure { fail("Encrypted settings could not be loaded. ${it.message ?: "Try reopening the app."}") }
         clipboard.addPrimaryClipChangedListener(foregroundClipboardListener)
@@ -173,6 +179,7 @@ class SyncEngine(val context: Context) {
             "messagesPermissions" to state.value.messagePermissions,
             "protocol" to 2,
             "lanes" to array(listOf("control","bulk","realtime")),
+            "binaryFiles" to true,
             "capabilitySet" to obj("capabilities" to array(capabilities))
         ),capability = "device")
         connection.enqueue(decorate(message))
@@ -247,6 +254,7 @@ class SyncEngine(val context: Context) {
                         connections[saved.id] = connection; attempts = 0
                         connection.startWriter(scope)
                         mutable.update { it.copy(connections = it.connections + (saved.id to "Connected")) }
+                        connection.enqueue(decorate(fileTransportMessage()))
                         refreshPermissions(); reportPhoneStatus(connection)
                         PhoneNotificationService.current?.snapshot(connection)
                         PhoneNotificationService.current?.mediaSnapshot(connection)
@@ -359,6 +367,33 @@ class SyncEngine(val context: Context) {
     )
     fun send(macId: String, wire: Wire) { connections[macId]?.enqueue(decorate(wire)) }
     fun broadcast(wire: Wire) { val message = decorate(wire); connections.keys.forEach { connections[it]?.enqueue(message) } }
+    private fun fileTransportMessage() = Wire("file.transport.setting",obj(
+        "insecure" to state.value.insecureFileTransfer,
+        "revision" to fileTransportRevision,
+        "origin" to fileTransportOrigin
+    ),capability = "files")
+    @Synchronized fun setInsecureFileTransfer(enabled: Boolean) {
+        if (state.value.insecureFileTransfer == enabled) return
+        fileTransportRevision = maxOf(fileTransportRevision + 1,System.currentTimeMillis())
+        fileTransportOrigin = store.phoneId
+        applyFileTransportSetting(enabled,fileTransportRevision,fileTransportOrigin)
+    }
+    @Synchronized private fun applyFileTransportSetting(enabled: Boolean, revision: Long, origin: String) {
+        require(revision >= 0 && revision < System.currentTimeMillis() + 300_000 && origin.length <= 128)
+        val previous = state.value.insecureFileTransfer
+        mutable.update { it.copy(insecureFileTransfer = enabled) }
+        fileTransportRevision = revision; fileTransportOrigin = origin
+        safeSave("insecure-file-transfer",enabled.toString())
+        safeSave("file-transport-revision",revision.toString())
+        safeSave("file-transport-origin",origin)
+        if (previous && !enabled) fileManager.interruptPlain()
+        broadcast(fileTransportMessage())
+    }
+    @Synchronized private fun receiveFileTransportSetting(enabled: Boolean, revision: Long, origin: String) {
+        if (shouldAdoptFileTransportSetting(revision,origin,fileTransportRevision,fileTransportOrigin)) {
+            applyFileTransportSetting(enabled,revision,origin)
+        }
+    }
     private fun receive(connection: MacConnection, wire: Wire) {
         wire.clock?.let(logicalClock::observe)
         if (wire.type == "pong") return
@@ -369,6 +404,11 @@ class SyncEngine(val context: Context) {
         if (!seen.insert(wire.id)) return
         val b = wire.body
         when (wire.type) {
+            "file.transport.setting" -> {
+                val revision = b.getLong("revision")
+                val origin = b.getString("origin")
+                receiveFileTransportSetting(b.getBoolean("insecure"),revision,origin)
+            }
             "notifications.refresh" -> { refreshPermissions(true); PhoneNotificationService.current?.snapshot(connection); reportPhoneStatus(connection) }
             "media.command" -> PhoneNotificationService.current?.executeMedia(connection,wire)
                 ?: send(connection.peer.id,Wire("media.result",obj("state" to "failed","reason" to "Notification access is required for media controls."),replyTo = wire.id,capability = "media"))

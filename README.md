@@ -16,7 +16,8 @@ Native Android and macOS apps for private synchronization over your local networ
 
 - Searchable Android notification inbox on Mac, with replies when supported by the source app.
 - Clipboard text, links and images, with searchable encrypted history on Mac.
-- Resumable file transfers with SHA256 integrity checks.
+- Binary file transfers over TLS, with resume support and SHA-256 integrity checks.
+- Optional unencrypted local file transfers with a synchronized setting across paired devices.
 - Android photo and shared-storage browsing with the required permissions.
 - Optional carrier SMS, contacts, call history and call controls. Call audio stays on the phone. MMS and RCS are not supported.
 - Screen mirroring with fresh Android capture consent and optional remote control.
@@ -24,6 +25,18 @@ Native Android and macOS apps for private synchronization over your local networ
 - Encrypted pairing, separate permissions for each Mac, and no AndroidSync account or cloud relay.
 
 Android limits background clipboard access. Use capture while Android Sync is visible, Android's Share action, or manual capture. Privacy Mode does not hide other apps or the mirrored phone screen; revealed items can appear in recordings.
+
+## File transfer modes
+
+Encrypted Wi-Fi is the default. File bytes stream over authenticated TLS with bounded memory and durable checkpoints approximately every 8 MiB. Interrupted transfers resume from the receiver's saved offset, and received files are published only after SHA-256 verification. Older paired versions can use the original Base64/JSON transfer path.
+
+The optional **Insecure transfer (faster)** checkbox uses an unencrypted local TCP connection for new file batches. File offers and random per-batch tokens still travel over authenticated TLS, and the receiver checks the token and file hash. **Anyone who can observe the local network can read these file bytes.** Hash verification detects corruption; it does not provide privacy.
+
+The setting synchronizes between paired devices and persists across restarts. Turning it off cancels active unencrypted batches; restart them to use TLS. A batch keeps its selected transport rather than changing modes silently. If the plaintext listener is unavailable, disable the option to use encrypted file transfers.
+
+The binary path removes Base64 expansion and per-chunk response waits. Actual throughput depends on Wi-Fi, storage and both devices. Unencrypted mode is not guaranteed to be faster. Large Android gallery selections still need preparation and hashing before transfer.
+
+See [CHANGELOG.md](CHANGELOG.md) for release changes.
 
 ## Build Android
 
