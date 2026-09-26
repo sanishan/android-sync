@@ -2,7 +2,7 @@ plugins { id("com.android.application"); id("org.jetbrains.kotlin.plugin.compose
 android {
     namespace = "dev.androidsync"
     compileSdk = 37
-    defaultConfig { applicationId = "dev.androidsync"; minSdk = 31; targetSdk = 36; versionCode = 9; versionName = "1.1"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
+    defaultConfig { applicationId = "dev.androidsync"; minSdk = 31; targetSdk = 36; versionCode = 10; versionName = "1.1.1"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
     flavorDimensions += "distribution"
     productFlavors {
         create("localFull") {

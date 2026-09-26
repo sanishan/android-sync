@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.1 — 2026-09-26
+
+- Sign Android release distribution with the permanent AndroidSync signing key.
+- Distribute the universal Mac app with Developer ID signing, hardened runtime and Apple notarization.
+- Add detailed signing, notarization and source-build instructions to the README.
+- Require Android signing credentials for release workflow success and remove temporary key material after the job.
+- Increase Android version code and macOS build number to 10.
+
+Restore 22 Android and 26 Swift unit tests in the source repository so verification runs execute the actual test suites.
+
+
 ## 1.1 — 2026-09-25
 
 ### Added

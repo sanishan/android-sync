@@ -29,9 +29,8 @@ jobs:
           RELEASE_PASSWORD: ${{ secrets.ANDROID_SYNC_RELEASE_PASSWORD }}
         run: |
           if [[ -z "$RELEASE_KEYSTORE_BASE64" || -z "$RELEASE_PASSWORD" ]]; then
-            echo 'ready=false' >> "$GITHUB_OUTPUT"
-            echo 'Signing secrets are absent; compilation and tests completed without a signed artifact.'
-            exit 0
+            echo 'Release signing secrets are required.' >&2
+            exit 1
           fi
           mkdir -p "$RUNNER_TEMP/android-sync-signing"
           printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/android-sync-signing/release-signing.p12"
@@ -63,3 +62,6 @@ jobs:
           path: dist/AndroidSync-localFull-signed.apk
           retention-days: 7
           if-no-files-found: error
+      - name: Remove temporary signing material
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/android-sync-signing/release-signing.p12"

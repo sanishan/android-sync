@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "id": "d6b2731b-881b-4b46-ab04-15d4f121a221",
+  "type": "clipboard.put",
+  "body": {
+    "clipId": "c53dc0c8-0ca0-4cb2-8455-e5cf52820336",
+    "size": 24576,
+    "sha256": "4918a2a755d64688542ae9f2f20d2c31b1b345233d859e94a8d4d04b68fe5892",
+    "mime": "image/png",
+    "width": 1080,
+    "height": 720,
+    "origin": "Galaxy S25 Ultra",
+    "sourceApp": "Gallery",
+    "revision": 42,
+    "session": "84d2a87c-a3eb-4e0b-81f6-23dd78712286"
+  }
+}

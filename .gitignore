@@ -32,3 +32,18 @@ local.properties
 /protocol/
 AGENTS.md
 SKILL.md
+
+# Distribution identities, notarization credentials and local exports
+*.p8
+*.pfx
+*.csr
+*.der
+*.mobileprovision
+*.provisionprofile
+*.xcarchive/
+*.app/
+*.dmg
+*.apk
+*.idsig
+*ExportOptions*.plist
+*notarization*.json

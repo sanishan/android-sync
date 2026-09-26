@@ -1,0 +1,1 @@
+{"v":2,"id":"sms-event-1","type":"sms.message","originDeviceId":"6e359743-5b0d-4fc3-a7fb-99ec72df0710","clock":21,"sentAt":1789511500000,"capability":"sms","body":{"id":"8842","threadId":"92","address":"+15550102020","body":"Generated fixture message","timestamp":1789511495000,"outgoing":false,"read":false}}

@@ -1,0 +1,15 @@
+{
+  "v": 2,
+  "id": "71d4f131-4786-4870-a5d1-64cfa782d45f",
+  "type": "clipboard.update",
+  "originDeviceId": "73eeb3f3-9c10-413f-ac68-707b3f3f43a7",
+  "clock": 42,
+  "sentAt": 1800000000123,
+  "capability": "clipboard",
+  "replyTo": "355e1ceb-8e2f-498a-ad80-398e36b19289",
+  "body": {
+    "clipId": "8554e730-7e48-4e20-942b-d31c032dbed8",
+    "kind": "text",
+    "text": "Protocol v2 fixture"
+  }
+}
