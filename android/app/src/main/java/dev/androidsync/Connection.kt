@@ -12,14 +12,13 @@ import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.selects.select
-import java.util.concurrent.atomic.AtomicReference
 
 class MacConnection(
     val peer: MacPeer, val socket: Socket, val io: FrameIO, val protocolVersion: Int,
     val binaryFiles: Boolean = false, val plainFilePort: Int = 0, val insecure: Boolean = false
 ) : AutoCloseable {
     private val outbound = Channel<List<Wire>>(256)
-    private val latestRealtimeFrame = AtomicReference<List<Wire>?>(null)
+    private val realtimeFrames = RealtimeVideoQueue<List<Wire>>()
     private val realtimeFrameReady = Channel<Unit>(Channel.CONFLATED)
     private var writer: Job? = null
     @Synchronized fun startWriter(scope: CoroutineScope) {
@@ -28,9 +27,9 @@ class MacConnection(
             try {
                 while (isActive) {
                     val batch = select<List<Wire>?> {
-                        outbound.onReceiveCatching { it.getOrNull() }
-                        realtimeFrameReady.onReceiveCatching { if (it.isSuccess) latestRealtimeFrame.getAndSet(null) else null }
-                    } ?: break
+                        outbound.onReceiveCatching { it.getOrThrow() }
+                        realtimeFrameReady.onReceiveCatching { it.getOrThrow(); realtimeFrames.poll() }
+                    } ?: continue
                     batch.forEach { io.send(it) }
                 }
             } catch (_: Exception) { close() }
@@ -39,24 +38,24 @@ class MacConnection(
     fun enqueue(wire: Wire) = enqueueBatch(listOf(wire))
     fun enqueueBatch(batch: List<Wire>) { if (outbound.trySend(batch).isFailure) close() }
     /**
-     * Screen video must favor the newest frame. Keeping a large FIFO
-     * here turns a brief Wi-Fi slowdown into seconds of visible latency.
-     * At most one complete encoded frame waits behind the frame being written.
-     * The caller requests a fresh keyframe when this reports a replacement.
+     * Only keyframes can replace queued video. Dropping a predicted frame
+     * invalidates later predicted frames, so pause them until a fresh keyframe.
+     * At most one complete frame waits behind the frame being written.
      */
-    fun enqueueLatestRealtimeFrame(batch: List<Wire>): Boolean {
-        if (batch.isEmpty()) return false
-        val replaced = latestRealtimeFrame.getAndSet(batch) != null
-        realtimeFrameReady.trySend(Unit)
-        return replaced
+    internal fun enqueueRealtimeFrame(batch: List<Wire>, keyFrame: Boolean): RealtimeVideoQueue.Offer {
+        val result = realtimeFrames.offer(batch,keyFrame)
+        if (result.accepted) realtimeFrameReady.trySend(Unit)
+        return result
     }
+    internal fun needsRealtimeKeyFrame(): Boolean = realtimeFrames.needsKeyFrame()
+    internal fun resetRealtimeVideo() { realtimeFrames.clear() }
     /**
      * Large snapshots must wait for the writer instead of treating a temporarily
      * full queue as a broken connection. The regular non-suspending enqueue path
      * remains fail-fast for realtime/control events.
      */
     suspend fun enqueueBatchAwait(batch: List<Wire>) { outbound.send(batch) }
-    override fun close() { latestRealtimeFrame.set(null); realtimeFrameReady.close(); outbound.close(); writer?.cancel(); runCatching { socket.close() } }
+    override fun close() { realtimeFrames.clear(); realtimeFrameReady.close(); outbound.close(); writer?.cancel(); runCatching { socket.close() } }
     companion object {
         fun openBulk(peer: MacPeer, store: SecureStore): MacConnection = runCatching { open(peer,store,"bulk") }.getOrElse { open(peer,store,"file") }
         fun openPlainFile(peer: MacPeer, port: Int): MacConnection {

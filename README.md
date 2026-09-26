@@ -100,7 +100,7 @@ The bundled `macOS/AndroidSync/Tools/adb` is a runtime dependency for optional A
 
 ### Release signing status
 
-The macOS app in version 1.1.1 is signed with Muhammad Sanaullah's Apple Developer ID Application identity and notarized by Apple. Its stapled notarization ticket has been validated. Download official packages from the [v1.1.1 release](https://github.com/sanishan/android-sync/releases/tag/v1.1.1).
+The macOS app in version 1.1.2 is signed with Muhammad Sanaullah's Apple Developer ID Application identity and notarized by Apple. Its stapled notarization ticket has been validated. Download official packages from the [v1.1.2 release](https://github.com/sanishan/android-sync/releases/tag/v1.1.2).
 
 The Full APK is signed with the permanent AndroidSync release key. The `dev.androidsync` package and signing certificate were recorded as registered and verified through Google's Android developer verification on 26 September 2026. Google does not sign this APK or certify its contents. The Standard package has separate registration requirements and is not included in this signed release workflow.
 
@@ -121,8 +121,8 @@ For a local release build, use your own existing signing key:
 "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
   --ks /secure/path/release.p12 --ks-key-alias YOUR_KEY_ALIAS \
   --ks-pass env:ANDROID_SIGNING_PASSWORD --key-pass env:ANDROID_SIGNING_PASSWORD \
-  --out /tmp/AndroidSync-1.1.1.apk /tmp/AndroidSync-aligned.apk
-"$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs /tmp/AndroidSync-1.1.1.apk
+  --out /tmp/AndroidSync-1.1.2.apk /tmp/AndroidSync-aligned.apk
+"$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs /tmp/AndroidSync-1.1.2.apk
 ```
 
 Keep the same release key for future updates. Older debug-signed installations cannot be updated in place by this release key. Save anything important before uninstalling an older build; reinstalling requires pairing and setup again.
@@ -130,7 +130,7 @@ Keep the same release key for future updates. Older debug-signed installations c
 ### Build, sign and notarize the Mac DMG
 
 1. Install Xcode and its command line tools. Enroll in the Apple Developer Program and add your account in Xcode Settings. Create a **Developer ID Application** certificate with its private key in Keychain. Keep private keys, passwords and API keys outside the repository. The project uses the official developer's team; choose your own team for a personal build.
-2. Set the release version and build number in `macOS/AndroidSync/Info.plist`. For this release they are `1.1.1` and `10`. Open `macOS/AndroidSync.xcodeproj`, select the AndroidSync scheme, use Release configuration and keep Hardened Runtime enabled. Build both `arm64` and `x86_64` with `ONLY_ACTIVE_ARCH=NO`.
+2. Set the release version and build number in `macOS/AndroidSync/Info.plist`. For this release they are `1.1.2` and `11`. Open `macOS/AndroidSync.xcodeproj`, select the AndroidSync scheme, use Release configuration and keep Hardened Runtime enabled. Build both `arm64` and `x86_64` with `ONLY_ACTIVE_ARCH=NO`.
 3. Choose **Product → Archive**. In **Window → Organizer → Archives**, select the archive and choose **Distribute App → Developer ID / Direct Distribution**. Let Xcode sign and submit it to Apple. Wait until Apple reports acceptance, then export the notarized app. Do not edit files inside the exported bundle.
 4. Verify the exported app and its nested executable. Use the actual ADB location in your bundle, which can be `Contents/Resources/adb` or `Contents/Resources/Tools/adb`:
 
@@ -152,15 +152,15 @@ mkdir -p build/dmg-stage
  ditto "$APP" build/dmg-stage/AndroidSync.app
 ln -s /Applications build/dmg-stage/Applications
 hdiutil create -volname AndroidSync -srcfolder build/dmg-stage \
-  -ov -format UDZO build/AndroidSync-macOS-1.1.1.dmg
+  -ov -format UDZO build/AndroidSync-macOS-1.1.2.dmg
 codesign --sign "Developer ID Application: YOUR NAME (TEAMID)" \
-  --timestamp build/AndroidSync-macOS-1.1.1.dmg
+  --timestamp build/AndroidSync-macOS-1.1.2.dmg
 ```
 
 6. Set up a `notarytool` Keychain profile using Apple's interactive `xcrun notarytool store-credentials` flow. Keep its secrets in Keychain. Submit the final DMG, using your profile name:
 
 ```sh
-xcrun notarytool submit build/AndroidSync-macOS-1.1.1.dmg \
+xcrun notarytool submit build/AndroidSync-macOS-1.1.2.dmg \
   --keychain-profile YOUR_PROFILE --wait
 ```
 
@@ -169,12 +169,12 @@ Apple processing can take time. If you stop waiting, retain the submission ID an
 7. Staple and validate the DMG, then test the exact final download with Gatekeeper enabled:
 
 ```sh
-xcrun stapler staple build/AndroidSync-macOS-1.1.1.dmg
-xcrun stapler validate build/AndroidSync-macOS-1.1.1.dmg
-codesign --verify --strict build/AndroidSync-macOS-1.1.1.dmg
+xcrun stapler staple build/AndroidSync-macOS-1.1.2.dmg
+xcrun stapler validate build/AndroidSync-macOS-1.1.2.dmg
+codesign --verify --strict build/AndroidSync-macOS-1.1.2.dmg
 spctl --assess --type open --context context:primary-signature \
-  --verbose=2 build/AndroidSync-macOS-1.1.1.dmg
-shasum -a 256 build/AndroidSync-macOS-1.1.1.dmg
+  --verbose=2 build/AndroidSync-macOS-1.1.2.dmg
+shasum -a 256 build/AndroidSync-macOS-1.1.2.dmg
 ```
 
 Test installation, pairing and relaunch in a clean Mac user account, preferably on another Mac. Older ad hoc builds may require Keychain access approval when migrating. Notarization does not grant access to existing Keychain items. Package the stapled app separately if offering a ZIP. A ZIP itself cannot be stapled, and a new outer DMG needs its own notarization.

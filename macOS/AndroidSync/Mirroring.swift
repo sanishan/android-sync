@@ -8,24 +8,44 @@ import Network
 
 final class H264VideoDecoder {
     var onFrame: ((NSImage) -> Void)?
+    var onRecoveryNeeded: (() -> Void)?
     private let queue = DispatchQueue(label: "dev.androidsync.h264-decoder", qos: .userInteractive)
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
     private var format: CMVideoFormatDescription?
     private var session: VTDecompressionSession?
+    private var savedConfig: (Data,Data?)?
+    private let stateLock = NSLock()
+    private var gate = H264DecodeGate()
+    private var latestImage: (NSImage,UInt64)?
+    private var deliveryScheduled = false
+    private var recoveryScheduled = false
+    var backlog: Int { stateLock.lock(); defer { stateLock.unlock() }; return gate.pending }
 
     func configure(csd0: Data, csd1: Data?) {
-        queue.async { [weak self] in self?.configureNow(csd0: csd0, csd1: csd1) }
+        stateLock.lock(); gate.reset(); let token = gate.generation; latestImage = nil; stateLock.unlock()
+        queue.async { [weak self] in
+            guard let self, self.isCurrent(token) else { return }
+            self.savedConfig = (csd0,csd1)
+            self.configureNow(csd0: csd0, csd1: csd1)
+        }
     }
 
     func decode(_ encoded: Data, presentationTime: Int64, keyFrame: Bool) {
-        queue.async { [weak self] in self?.decodeNow(encoded,presentationTime: presentationTime,keyFrame: keyFrame) }
+        stateLock.lock(); let token = gate.reserve(keyFrame: keyFrame); stateLock.unlock()
+        guard let token else { requestRecovery(); return }
+        queue.async { [weak self] in
+            guard let self, self.isCurrent(token) else { return }
+            self.decodeNow(encoded,presentationTime: presentationTime,keyFrame: keyFrame,generation: token)
+            self.stateLock.lock(); self.gate.finish(token); self.stateLock.unlock()
+        }
     }
 
     func reset() {
+        stateLock.lock(); gate.reset(); latestImage = nil; stateLock.unlock()
         queue.async { [weak self] in
             guard let self else { return }
             if let session { VTDecompressionSessionWaitForAsynchronousFrames(session); VTDecompressionSessionInvalidate(session) }
-            self.session = nil; self.format = nil
+            self.session = nil; self.format = nil; self.savedConfig = nil
         }
     }
 
@@ -42,9 +62,11 @@ final class H264VideoDecoder {
             return CMVideoFormatDescriptionCreateFromH264ParameterSets(allocator: kCFAllocatorDefault, parameterSetCount: 2, parameterSetPointers: pointers, parameterSetSizes: sizes, nalUnitHeaderLength: 4, formatDescriptionOut: &description)
         } }
         guard status == noErr, let videoDescription = description else { return }
-        var callback = VTDecompressionOutputCallbackRecord(decompressionOutputCallback: { refcon, _, status, _, imageBuffer, _, _ in
-            guard status == noErr, let refcon, let imageBuffer else { return }
-            Unmanaged<H264VideoDecoder>.fromOpaque(refcon).takeUnretainedValue().render(imageBuffer)
+        var callback = VTDecompressionOutputCallbackRecord(decompressionOutputCallback: { refcon, frameRefcon, status, _, imageBuffer, _, _ in
+            guard let refcon else { return }
+            let decoder = Unmanaged<H264VideoDecoder>.fromOpaque(refcon).takeUnretainedValue()
+            guard status == noErr, let imageBuffer, let frameRefcon else { decoder.requestRecovery(); return }
+            decoder.render(imageBuffer,generation: UInt64(UInt(bitPattern: frameRefcon) - 1))
         }, decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque())
         let attributes: [NSString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                                             kCVPixelBufferIOSurfacePropertiesKey: [:]]
@@ -53,8 +75,9 @@ final class H264VideoDecoder {
         format = videoDescription
     }
 
-    private func decodeNow(_ encoded: Data, presentationTime: Int64, keyFrame: Bool) {
-        guard let session, let format else { return }
+    private func decodeNow(_ encoded: Data, presentationTime: Int64, keyFrame: Bool, generation: UInt64) {
+        if session == nil, keyFrame, let savedConfig { configureNow(csd0: savedConfig.0,csd1: savedConfig.1) }
+        guard let session, let format else { requestRecovery(); return }
         let data = Self.avcc(encoded)
         guard !data.isEmpty else { return }
         var block: CMBlockBuffer?
@@ -65,16 +88,50 @@ final class H264VideoDecoder {
         var size = data.count
         var sample: CMSampleBuffer?
         guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format, sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sample) == noErr, let sample else { return }
-        _ = keyFrame
-        let flags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression]
-        VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: flags, frameRefcon: nil, infoFlagsOut: nil)
+        // Decode serially on the bounded worker. An unbounded asynchronous VT
+        // queue can continue growing even after the input dispatch queue drains.
+        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], frameRefcon: UnsafeMutableRawPointer(bitPattern: UInt(generation) + 1), infoFlagsOut: nil)
+        if status != noErr {
+            VTDecompressionSessionInvalidate(session); self.session = nil
+            stateLock.lock(); if gate.generation == generation { gate.reset() }; stateLock.unlock()
+            requestRecovery()
+        }
     }
 
-    private func render(_ pixelBuffer: CVPixelBuffer) {
+    private func render(_ pixelBuffer: CVPixelBuffer, generation: UInt64) {
+        guard isCurrent(generation) else { return }
         let image = CIImage(cvPixelBuffer: pixelBuffer)
         guard let cg = imageContext.createCGImage(image, from: image.extent) else { return }
         let frame = NSImage(cgImage: cg,size: NSSize(width: image.extent.width,height: image.extent.height))
-        DispatchQueue.main.async { [weak self] in self?.onFrame?(frame) }
+        stateLock.lock()
+        guard generation == gate.generation else { stateLock.unlock(); return }
+        latestImage = (frame,generation)
+        let schedule = !deliveryScheduled; deliveryScheduled = true
+        stateLock.unlock()
+        guard schedule else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            let image = self.latestImage; self.latestImage = nil; self.deliveryScheduled = false
+            let current = self.gate.generation
+            self.stateLock.unlock()
+            if let image, image.1 == current { self.onFrame?(image.0) }
+        }
+    }
+
+    private func isCurrent(_ token: UInt64) -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }; return token == gate.generation
+    }
+    private func requestRecovery() {
+        stateLock.lock()
+        let schedule = !recoveryScheduled; recoveryScheduled = true
+        stateLock.unlock()
+        guard schedule else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock(); self.recoveryScheduled = false; self.stateLock.unlock()
+            self.onRecoveryNeeded?()
+        }
     }
 
     private static func nalUnits(in data: Data) -> [Data] {

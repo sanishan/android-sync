@@ -131,6 +131,7 @@ import Combine
     private var requestedGalleryThumbnails = Set<String>()
     private var mirrorRequestedAt = Date.distantPast
     private var mirrorFramesReceived = 0
+    private var mirrorHealth = MirrorStreamHealth()
     private let adb = BundledADBClient()
     let bluetoothCalls = BluetoothCalls()
     private let clipboardImageCache = NSCache<NSString, NSImage>()
@@ -154,7 +155,12 @@ import Combine
             DispatchQueue.main.async { [weak self] in self?.bluetoothCalls.restoreConnection() }
         }
         adbAvailable = adb.available
-        mirrorDecoder.onFrame = { [weak self] frame in self?.mirrorFrame = frame }
+        mirrorDecoder.onFrame = { [weak self] frame in
+            guard let self, self.mirrorSessionId != nil else { return }
+            self.mirrorHealth.displayedFrame(at: ProcessInfo.processInfo.systemUptime)
+            self.mirrorFrame = frame
+        }
+        mirrorDecoder.onRecoveryNeeded = { [weak self] in self?.requestMirrorKeyFrame(decoderFailed: true) }
         _ = receiveFolder.startAccessingSecurityScopedResource()
         do {
             history = try EncryptedHistory(directory: storageDirectory)
@@ -756,6 +762,7 @@ import Combine
                 peer.sendAndClose(WireMessage("stream.result",id: message.id,["sessionId": offeredSession ?? "","state": "failed","reason": "No matching recent Mac realtime request is active."],replyTo: message.id)); return
             }
             realtimeConnections.removeValue(forKey: phoneId)?.close(); realtimeConnections[phoneId] = peer
+            mirrorHealth.start(at: ProcessInfo.processInfo.systemUptime)
             mirrorControlEnabled = b["control"] as? Bool == true
             mirrorStatus = mirrorControlEnabled ? "Streaming with remote control" : "Streaming · view only"
             peer.send(WireMessage("stream.result",id: message.id,["sessionId": offeredSession!,"state": "accepted"],capability: "realtime",replyTo: message.id))
@@ -765,6 +772,7 @@ import Combine
             let csd1 = (b["csd1"] as? String).flatMap { Data(base64Encoded: $0) }
             guard b["sessionId"] as? String == mirrorSessionId else { return }
             mirrorWidth = (b["width"] as? NSNumber)?.intValue ?? 0; mirrorHeight = (b["height"] as? NSNumber)?.intValue ?? 0
+            realtimeFrames.removeAll()
             mirrorDecoder.configure(csd0: csd0,csd1: csd1)
         case "stream.video":
             guard realtimeConnections[phoneId]?.id == peer.id else { peer.close(); return }
@@ -781,7 +789,9 @@ import Combine
             else { realtimeFrames[frameId] = frame }
             if realtimeFrames.count > 12 { realtimeFrames.removeValue(forKey: realtimeFrames.keys.first!) }
             mirrorFramesReceived += 1
-            if mirrorFramesReceived % 30 == 0, let frameSession { peer.send(WireMessage("stream.feedback",["sessionId": frameSession,"backlog": realtimeFrames.count],capability: "realtime")) }
+        case "ping":
+            guard realtimeConnections[phoneId]?.id == peer.id, b["sessionId"] as? String == mirrorSessionId else { return }
+            peer.send(WireMessage("pong",id: message.id,["sessionId": mirrorSessionId ?? ""],capability: "realtime"))
         case "control.result":
             guard realtimeConnections[phoneId]?.id == peer.id else { peer.close(); return }
             remoteControlStatus = b["reason"] as? String ?? (b["state"] as? String ?? "Control result received.")
@@ -823,7 +833,18 @@ import Combine
         clipboardCount = pasteboard.changeCount; save(); refreshCallPopup()
     }
     private func resetClipboardCount() { clipboardCount = pasteboard.changeCount }
+    private func requestMirrorKeyFrame(decoderFailed: Bool = false) {
+        guard let phoneId = mirrorPhoneId, let sessionId = mirrorSessionId, let peer = realtimeConnections[phoneId],
+              mirrorHealth.recoveryDue(at: ProcessInfo.processInfo.systemUptime,decoderFailed: decoderFailed) else { return }
+        peer.send(WireMessage("stream.keyframe",["sessionId": sessionId],capability: "realtime"))
+    }
     private func tick() {
+        if let phoneId = mirrorPhoneId, let sessionId = mirrorSessionId, let peer = realtimeConnections[phoneId] {
+            if mirrorHealth.feedbackDue(at: ProcessInfo.processInfo.systemUptime) {
+                peer.send(WireMessage("stream.feedback",["sessionId": sessionId,"backlog": mirrorDecoder.backlog],capability: "realtime"))
+            }
+            requestMirrorKeyFrame()
+        }
         let count = pasteboard.changeCount
         if count != clipboardCount {
             clipboardCount = count

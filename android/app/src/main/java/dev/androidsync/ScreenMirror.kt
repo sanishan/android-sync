@@ -25,8 +25,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
 import java.nio.ByteBuffer
 import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.roundToInt
 
 private const val MIRROR_NOTIFICATION_ID = 7041
@@ -196,7 +198,8 @@ class ScreenMirrorService : Service() {
     @Volatile private var stopping = false
     private var bitrate = 4_000_000
     private var targetBitrate = 4_000_000
-    private var waitingForKeyFrame = false
+    private val encoderCommands = ConcurrentLinkedQueue<Wire>()
+    private var lastKeyFrameRequestAt = 0L
     private var lastFrameDropAt = 0L
     private var lastBitrateAdjustmentAt = 0L
     private var spec: CaptureSpec? = null
@@ -222,6 +225,12 @@ class ScreenMirrorService : Service() {
                 val response = realtime.io.read()
                 require(response.type == "stream.result" && response.body.optString("state") == "accepted" && response.body.optString("sessionId") == sessionId) { "Mac did not accept the screen stream." }
                 startProjection(resultCode,resultData,realtime)
+                val heartbeat = launch {
+                    while (isActive) {
+                        delay(5_000)
+                        realtime.enqueue(Wire("ping",obj("sessionId" to sessionId)))
+                    }
+                }
                 val reader = launch {
                     try {
                         while (isActive) {
@@ -229,8 +238,7 @@ class ScreenMirrorService : Service() {
                             if (command.body.optString("sessionId") != sessionId) continue
                             when (command.type) {
                                 "stream.stop" -> { stopSession("Stopped from the Mac."); return@launch }
-                                "stream.configure" -> updateBitrate(realtime,command.body.optInt("bitrate",bitrate))
-                                "stream.feedback" -> adaptBitrate(realtime,command.body.optInt("backlog",0))
+                                "stream.configure", "stream.feedback", "stream.keyframe" -> encoderCommands.add(command)
                                 "control.input" -> handleControl(realtime,command)
                             }
                         }
@@ -238,10 +246,11 @@ class ScreenMirrorService : Service() {
                         if (!stopping && error !is kotlinx.coroutines.CancellationException) stopSession("Mac ended screen sharing.")
                     }
                 }
-                drainEncoder(realtime)
-                reader.cancel()
+                try { drainEncoder(realtime) } finally { reader.cancel(); heartbeat.cancel() }
             } catch (e: Exception) {
-                engine().send(macId,Wire("stream.result",obj("sessionId" to sessionId,"state" to "failed","reason" to (e.message ?: "Screen stream ended.")),capability = "realtime"))
+                if (!stopping && e !is kotlinx.coroutines.CancellationException) {
+                    engine().send(macId,Wire("stream.result",obj("sessionId" to sessionId,"state" to "failed","reason" to (e.message ?: "Screen stream ended.")),capability = "realtime"))
+                }
             } finally { stopSession("Screen stream ended.") }
         }
         return START_NOT_STICKY
@@ -270,6 +279,10 @@ class ScreenMirrorService : Service() {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC,value.width,value.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT,MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE,bitrate); setInteger(MediaFormat.KEY_FRAME_RATE,30); setInteger(MediaFormat.KEY_I_FRAME_INTERVAL,1)
+            // Surface capture can stop producing frames on a static screen.
+            // Repeat at a low idle rate so recovery keyframes can still arrive.
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER,200_000L)
+            setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER,30f)
             if (Build.VERSION.SDK_INT >= 23) setInteger(MediaFormat.KEY_PRIORITY,0)
             if (Build.VERSION.SDK_INT >= 29) { setInteger(MediaFormat.KEY_MAX_B_FRAMES,0); setInteger(MediaFormat.KEY_LATENCY,0) }
             if (Build.VERSION.SDK_INT >= 30 && encoder.codecInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)) {
@@ -283,16 +296,26 @@ class ScreenMirrorService : Service() {
 
     private suspend fun drainEncoder(realtime: MacConnection) {
         val info = MediaCodec.BufferInfo(); var checkedAt = 0L
-        while (engine().scope.isActive && !stopping) {
+        while (currentCoroutineContext().isActive && !stopping) {
+            while (true) {
+                val command = encoderCommands.poll() ?: break
+                when (command.type) {
+                    "stream.configure" -> updateBitrate(realtime,command.body.optInt("bitrate",bitrate))
+                    "stream.feedback" -> adaptBitrate(realtime,command.body.optInt("backlog",0))
+                    "stream.keyframe" -> requestKeyFrame()
+                }
+            }
+            if (realtime.needsRealtimeKeyFrame()) requestKeyFrame()
             val encoder = codec ?: break
             when (val index = encoder.dequeueOutputBuffer(info,10_000)) {
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> sendConfig(realtime,encoder.outputFormat)
                 MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                 else -> if (index >= 0) {
-                    encoder.getOutputBuffer(index)?.let { buffer ->
-                        if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) sendFrame(realtime,buffer,info)
-                    }
-                    encoder.releaseOutputBuffer(index,false)
+                    try {
+                        encoder.getOutputBuffer(index)?.let { buffer ->
+                            if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) sendFrame(realtime,buffer,info)
+                        }
+                    } finally { encoder.releaseOutputBuffer(index,false) }
                 }
             }
             val now = System.currentTimeMillis()
@@ -303,22 +326,25 @@ class ScreenMirrorService : Service() {
     private fun sendConfig(realtime: MacConnection, format: MediaFormat) {
         fun bytes(name: String): String? = format.getByteBuffer(name)?.let { source -> ByteArray(source.remaining()).also { source.get(it) } }?.let { Base64.encodeToString(it,Base64.NO_WRAP) }
         val current = spec ?: captureSpec()
+        realtime.resetRealtimeVideo()
         realtime.enqueue(engine().decorate(Wire("stream.config",obj("sessionId" to sessionId,"codec" to "h264","width" to current.width,"height" to current.height,"rotation" to current.rotation,"csd0" to bytes("csd-0"),"csd1" to bytes("csd-1")),capability = "realtime")))
     }
 
     private fun sendFrame(realtime: MacConnection, buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
         buffer.position(info.offset); buffer.limit(info.offset + info.size)
         val keyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
-        if (waitingForKeyFrame && !keyFrame) return
-        if (keyFrame) waitingForKeyFrame = false
+        if (realtime.needsRealtimeKeyFrame() && !keyFrame) return
         val data = ByteArray(info.size); buffer.get(data)
-        val frameId = UUID.randomUUID().toString(); val chunks = data.asList().chunked(VIDEO_CHUNK_BYTES)
-        val wires = chunks.mapIndexed { index, part ->
-            Wire("stream.video",obj("sessionId" to sessionId,"frameId" to frameId,"index" to index,"count" to chunks.size,"pts" to info.presentationTimeUs,"key" to keyFrame,"data" to Base64.encodeToString(part.toByteArray(),Base64.NO_WRAP)),capability = "realtime")
+        val frameId = UUID.randomUUID().toString(); val count = (data.size + VIDEO_CHUNK_BYTES - 1) / VIDEO_CHUNK_BYTES
+        val wires = (0 until count).map { index ->
+            val offset = index * VIDEO_CHUNK_BYTES; val length = minOf(VIDEO_CHUNK_BYTES,data.size - offset)
+            Wire("stream.video",obj("sessionId" to sessionId,"frameId" to frameId,"index" to index,"count" to count,"pts" to info.presentationTimeUs,"key" to keyFrame,"data" to Base64.encodeToString(data,offset,length,Base64.NO_WRAP)),capability = "realtime")
         }
-        if (realtime.enqueueLatestRealtimeFrame(wires.map(engine()::decorate))) {
-            waitingForKeyFrame = true; lastFrameDropAt = SystemClock.elapsedRealtime()
-            requestKeyFrame(); reduceBitrateForCongestion(realtime)
+        val queued = realtime.enqueueRealtimeFrame(wires.map(engine()::decorate),keyFrame)
+        if (queued.congested) {
+            lastFrameDropAt = SystemClock.elapsedRealtime()
+            if (queued.requestKeyFrame) requestKeyFrame()
+            reduceBitrateForCongestion(realtime)
         }
     }
 
@@ -352,6 +378,9 @@ class ScreenMirrorService : Service() {
         realtime.enqueue(engine().decorate(Wire("stream.configure.result",obj("sessionId" to sessionId,"state" to "adapted","requestedBitrate" to targetBitrate,"appliedBitrate" to bitrate,"reason" to reason),capability = "realtime")))
     }
     private fun requestKeyFrame() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastKeyFrameRequestAt < 750) return
+        lastKeyFrameRequestAt = now
         runCatching { codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME,0) }) }
     }
 

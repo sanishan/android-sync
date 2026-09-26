@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.2 — 2026-09-26
+
+- Fix Mirror Stream freezes after congestion by preserving H.264 frame dependencies and requesting a fresh keyframe when needed.
+- Recover the Mac decoder after missing frames or decoder errors instead of continuing with an invalid reference frame.
+- Keep idle screen-sharing connections alive and handle encoder commands on the encoder loop.
+- Add regression tests for video queue congestion, stream recovery and the Mac decoder.
+- Increase Android version code and macOS build number to 11. Update both apps for the full recovery improvements.
+
 ## 1.1.1 — 2026-09-26
 
 - Sign Android release distribution with the permanent AndroidSync signing key.

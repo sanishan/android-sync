@@ -275,6 +275,46 @@ public struct RealtimeFrameAssembly {
         return (0..<count).reduce(into: Data()) { output, index in output.append(parts[index]!) }
     }
 }
+/// Bound decode work without decoding predicted frames after a dropped reference.
+public struct H264DecodeGate {
+    public private(set) var pending = 0
+    public private(set) var generation: UInt64 = 0
+    public private(set) var waitingForKeyFrame = true
+    private let limit: Int
+    public init(limit: Int = 3) { self.limit = max(1,limit) }
+    public mutating func reset() {
+        generation &+= 1; pending = 0; waitingForKeyFrame = true
+    }
+    public mutating func reserve(keyFrame: Bool) -> UInt64? {
+        guard pending < limit else { waitingForKeyFrame = true; return nil }
+        guard keyFrame || !waitingForKeyFrame else { return nil }
+        if keyFrame { waitingForKeyFrame = false }
+        pending += 1
+        return generation
+    }
+    public mutating func finish(_ token: UInt64) {
+        if token == generation { pending = max(0,pending - 1) }
+    }
+}
+
+/// Monotonic timers are independent of frame count, including on static screens.
+public struct MirrorStreamHealth {
+    private var lastFrame: TimeInterval = 0
+    private var lastFeedback: TimeInterval = -.infinity
+    private var lastRecovery: TimeInterval = -.infinity
+    public init() {}
+    public mutating func start(at now: TimeInterval) {
+        lastFrame = now; lastFeedback = -.infinity; lastRecovery = -.infinity
+    }
+    public mutating func displayedFrame(at now: TimeInterval) { lastFrame = now }
+    public mutating func feedbackDue(at now: TimeInterval) -> Bool {
+        guard now - lastFeedback >= 1 else { return false }; lastFeedback = now; return true
+    }
+    public mutating func recoveryDue(at now: TimeInterval, decoderFailed: Bool = false) -> Bool {
+        guard decoderFailed || now - lastFrame >= 2, now - lastRecovery >= 1 else { return false }
+        lastRecovery = now; return true
+    }
+}
 public enum SyncRules {
     public static func validSharedStoragePath(_ path: String) -> Bool {
         guard !path.isEmpty, path.count <= 1024, !path.contains("\\"), !path.contains("\0") else { return false }
