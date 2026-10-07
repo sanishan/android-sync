@@ -2,6 +2,15 @@
 
 Native Android and macOS apps for private synchronization over your local network. Created by **Muhammad Sanaullah** · **AndroidSync.com**.
 
+## Download
+
+[<img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play" width="200">](https://play.google.com/store/apps/details?id=dev.androidsync)
+
+- **Android:** [Install AndroidSync from Google Play](https://play.google.com/store/apps/details?id=dev.androidsync). Visit the listing for the latest version, compatibility and available features.
+- **macOS:** [Download the signed and notarized Mac app from GitHub Releases](https://github.com/sanishan/android-sync/releases/latest).
+
+Google Play and the Google Play logo are trademarks of Google LLC.
+
 ## Screenshots
 
 ### macOS
@@ -183,7 +192,7 @@ References: [Apple notarization](https://developer.apple.com/documentation/secur
 
 ## Install and pair
 
-1. Install your chosen APK on Android. If prompted, allow the file app to install that package.
+1. Install [AndroidSync from Google Play](https://play.google.com/store/apps/details?id=dev.androidsync) on Android.
 2. Move `AndroidSync.app` to Applications and open it. Official releases must pass the signing and notarization checks above. For personal local builds blocked by macOS, review [Apple's instructions](https://support.apple.com/en-us/102445). If you trust the source, the app-specific exception is in **System Settings → Privacy & Security → Open Anyway** after a blocked launch. Do not override a malware warning.
 3. Connect both devices to the same private network. Allow Local Network access on Mac.
 4. In Mac **Devices**, create an invitation. On Android, scan its QR code or use invitation text. Pair each Mac separately.
